@@ -13,6 +13,15 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
+// appIcon is hoverdeck's own icon — the same wire/pin visual language as the
+// canvas (an "H" drawn as a schematic trace with via and terminal dots) —
+// rather than the default Wails logo. Windows picks up build/windows/icon.ico
+// automatically at build time; GTK does not do the equivalent for Linux, so
+// the PNG is embedded and handed to linux.Options.Icon below.
+//
+//go:embed build/appicon.png
+var appIcon []byte
+
 func main() {
 	app := NewApp()
 
@@ -35,6 +44,7 @@ func main() {
 		Linux: &linux.Options{
 			WindowIsTranslucent: false,
 			ProgramName:         "hoverdeck",
+			Icon:                appIcon,
 		},
 		Bind: []interface{}{
 			app,
