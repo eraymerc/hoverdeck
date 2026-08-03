@@ -1,0 +1,7 @@
+build/bin
+node_modules
+frontend/dist
+
+# hoverdeck sidecar layout files are per-user; keep them out of shared repos
+# (delete this line if you want to commit diagram layouts)
+*.hoverdeck.json
