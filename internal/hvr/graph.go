@@ -21,6 +21,13 @@ type Pin struct {
 	Name  string `json:"name"`
 	Net   string `json:"net"`
 	Span  Span   `json:"span"`
+
+	// Ref marks a pin whose bracket text is a dotted reference to another
+	// element's branch (e.g. CCCS/CCVS's "sense" port naming the voltage
+	// source it senses current through) rather than a net. Net still holds
+	// the raw text for display, but no Net/NetPin is built for it — a dotted
+	// element path only resolves in scope and has no wire geometry.
+	Ref bool `json:"ref"`
 }
 
 // DefRef points at where a block's module type is declared.
@@ -238,14 +245,14 @@ func (p *Project) BuildSheet(qualified string) (*Sheet, error) {
 				b.Domain = d.Domain
 				b.Def = &DefRef{Name: d.Name, File: d.File, Span: d.Span, Domain: d.Domain, Doc: d.Doc, Found: true}
 				b.Navigable = d.Domain != DomainDigital && hasChildren(d)
-				b.Pins = bindPins(src, g.PhysArgs, d.PhysPorts)
+				b.Pins = bindPins(src, g.PhysArgs, d.PhysPorts, -1)
 				b.LogicPorts = d.LogicPorts
 			} else {
 				b.Domain = DomainStructural
 				b.Def = &DefRef{Name: n.ModuleName, Found: false}
 				sh.Errors = append(sh.Errors, fmt.Sprintf(
 					"line %d: module %q is not visible here — is its import missing?", n.Token.Line, n.ModuleName))
-				b.Pins = bindPins(src, g.PhysArgs, nil)
+				b.Pins = bindPins(src, g.PhysArgs, nil, -1)
 			}
 			b.Icon = IconFor(bare, b.Domain)
 			b.Params = g.StaticArgs
@@ -265,8 +272,17 @@ func (p *Project) BuildSheet(qualified string) (*Sheet, error) {
 			start := src.Offset(n.Token.Line, n.Token.Column)
 			g := src.scanInvocation(start)
 
-			counters[n.PrimType]++
-			id := fmt.Sprintf("%s%d", PrimLabelPrefix(n.PrimType), counters[n.PrimType])
+			// A user-given instance name (`R rsense<1m>() [...]`) becomes the
+			// block's ID directly — it's also what a CCCS/CCVS elsewhere would
+			// name in its sense port, so it has to match the source exactly
+			// rather than being re-numbered. Only unnamed primitives consume
+			// the positional counter, matching the elaborator's own rule that
+			// PrimType_<n> synthesis only applies to the unnamed form.
+			id := n.Name
+			if id == "" {
+				counters[n.PrimType]++
+				id = fmt.Sprintf("%s%d", PrimLabelPrefix(n.PrimType), counters[n.PrimType])
+			}
 
 			pd, known := Primitive(n.PrimType)
 			b := Block{
@@ -290,10 +306,23 @@ func (p *Project) BuildSheet(qualified string) (*Sheet, error) {
 				b.Icon = "analog"
 				b.Ready = true
 			}
-			b.Pins = bindPins(src, g.PhysArgs, pd.Ports)
+
+			// CCCS/CCVS's last port names the element it senses current
+			// through, SPICE-style — a dotted path, not a net, so it must
+			// not be wired up like the rest of PhysArgs.
+			refIdx := -1
+			if n.IsCurrentControlled() {
+				for i, pn := range pd.Ports {
+					if pn == "sense" {
+						refIdx = i
+						break
+					}
+				}
+			}
+			b.Pins = bindPins(src, g.PhysArgs, pd.Ports, refIdx)
 
 			for _, pin := range b.Pins {
-				if pin.Net == "" {
+				if pin.Net == "" || pin.Ref {
 					continue
 				}
 				net := touch(pin.Net)
@@ -381,7 +410,7 @@ func hasChildren(d *ModuleDef) bool {
 // by the module (or the primitive's conventional pin names). Extra arguments
 // beyond the declared ports are still surfaced, positionally named, so an
 // arity mismatch is visible on the canvas rather than silently dropped.
-func bindPins(src *Source, args []Arg, portNames []string) []Pin {
+func bindPins(src *Source, args []Arg, portNames []string, refIndex int) []Pin {
 	pins := make([]Pin, 0, len(args))
 	for i, a := range args {
 		name := fmt.Sprintf("p%d", i+1)
@@ -393,6 +422,7 @@ func bindPins(src *Source, args []Arg, portNames []string) []Pin {
 			Name:  name,
 			Net:   strings.TrimSpace(a.Text),
 			Span:  a.Span,
+			Ref:   i == refIndex,
 		})
 	}
 	return pins

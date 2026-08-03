@@ -37,4 +37,4 @@ require (
 
 require hover v0.0.0
 
-replace hover => ../hover-lang
+replace hover => ../hover-main

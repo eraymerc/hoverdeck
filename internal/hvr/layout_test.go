@@ -260,6 +260,87 @@ func TestClearNetTrunkAlsoClearsLegOffsets(t *testing.T) {
 	}
 }
 
+// ccSourcesSrc mirrors tests/circuits/cc_sources.hvr in hover-main: a named
+// primitive (vsense) sensed by a CCCS and a CCVS elsewhere in the module.
+const ccSourcesSrc = `module main<>()[] {
+    wire vin, mid, vout, vmirror;
+
+    voltage_source<5>() [vin, gnd];
+    R<1k>()   [vin, mid];
+
+    module probe = Ammeter<>() [mid, gnd];
+
+    CCCS<2>()  [gnd, vout, probe.vsense];
+    R<500>()   [vout, gnd];
+
+    CCVS<1k>() [vmirror, gnd, probe.vsense];
+    R<10k>()   [vmirror, gnd];
+}
+
+analog module Ammeter<>() [wire p, wire n] {
+    voltage_source vsense<0>() [p, n];
+    double milliamps = I(vsense) * 1000.0;
+}
+`
+
+func TestNamedPrimitiveUsesSourceNameAsBlockID(t *testing.T) {
+	entry := writeTemp(t, map[string]string{"main.hvr": ccSourcesSrc})
+	p, _ := LoadProject(entry, "")
+	sh, err := p.BuildSheet("Ammeter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got *Block
+	for i := range sh.Blocks {
+		if sh.Blocks[i].ID == "vsense" {
+			got = &sh.Blocks[i]
+		}
+	}
+	if got == nil {
+		t.Fatal("named primitive vsense should keep its source name as its block ID, not a synthesized V1")
+	}
+}
+
+func TestCCCSAndCCVSSenseIsARefNotANet(t *testing.T) {
+	entry := writeTemp(t, map[string]string{"main.hvr": ccSourcesSrc})
+	p, _ := LoadProject(entry, "")
+	sh, err := p.BuildSheet("main")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, b := range sh.Blocks {
+		if b.TypeName != "CCCS" && b.TypeName != "CCVS" {
+			continue
+		}
+		if b.Ready == false {
+			t.Errorf("%s: catalog still marks this primitive not-ready", b.TypeName)
+		}
+		var sense *Pin
+		for i := range b.Pins {
+			if b.Pins[i].Name == "sense" {
+				sense = &b.Pins[i]
+			}
+		}
+		if sense == nil {
+			t.Fatalf("%s: no sense pin found", b.TypeName)
+		}
+		if !sense.Ref {
+			t.Errorf("%s: sense pin should be marked Ref, since it names an element rather than a net", b.TypeName)
+		}
+		if sense.Net != "probe.vsense" {
+			t.Errorf("%s: sense pin text: got %q, want %q", b.TypeName, sense.Net, "probe.vsense")
+		}
+	}
+
+	// The dotted reference must never leak into the net list as a bogus net.
+	for _, n := range sh.Nets {
+		if n.Name == "probe.vsense" {
+			t.Error("a CCCS/CCVS sense reference should not create a net")
+		}
+	}
+}
+
 func TestCorruptSidecarIsIgnored(t *testing.T) {
 	entry := writeTemp(t, map[string]string{"main.hvr": layoutSrc})
 	if err := WriteFile(LayoutPath(entry), "{ this is not json"); err != nil {

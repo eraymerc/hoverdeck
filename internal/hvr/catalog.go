@@ -31,8 +31,8 @@ var primitives = map[string]PrimitiveDef{
 	"current_source": {Name: "current_source", Icon: "isource", Ports: []string{"n+", "n-"}, Param: "dc_value", Unit: "A", Desc: "Ideal current source", Driveable: true, Ready: true},
 	"VCCS":           {Name: "VCCS", Icon: "vccs", Ports: []string{"n+", "n-", "nc+", "nc-"}, Param: "gm", Unit: "S", Desc: "Voltage-controlled current source", Ready: true},
 	"VCVS":           {Name: "VCVS", Icon: "vcvs", Ports: []string{"n+", "n-", "nc+", "nc-"}, Param: "k", Unit: "", Desc: "Voltage-controlled voltage source", Ready: true},
-	"CCCS":           {Name: "CCCS", Icon: "cccs", Ports: []string{"n+", "n-", "sense"}, Param: "beta", Unit: "", Desc: "Current-controlled current source (not ready)", Ready: false},
-	"CCVS":           {Name: "CCVS", Icon: "ccvs", Ports: []string{"n+", "n-", "sense"}, Param: "r", Unit: "Ω", Desc: "Current-controlled voltage source (not ready)", Ready: false},
+	"CCCS":           {Name: "CCCS", Icon: "cccs", Ports: []string{"n+", "n-", "sense"}, Param: "beta", Unit: "", Desc: "Current-controlled current source", Ready: true},
+	"CCVS":           {Name: "CCVS", Icon: "ccvs", Ports: []string{"n+", "n-", "sense"}, Param: "r", Unit: "Ω", Desc: "Current-controlled voltage source", Ready: true},
 }
 
 // IsPrimitive reports whether name is a built-in physical primitive.

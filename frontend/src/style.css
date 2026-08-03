@@ -421,6 +421,7 @@ svg.canvas.panning { cursor: grabbing; }
 
 .pin-dot { fill: var(--panel); stroke: var(--wire); stroke-width: 1.4; }
 .pin-dot.hot { fill: var(--wire-hi); stroke: var(--wire-hi); }
+.pin-dot.pin-ref { stroke-dasharray: 2 1.4; }
 .pin-hit { fill: transparent; cursor: pointer; }
 .pin-name {
   font-family: var(--mono);

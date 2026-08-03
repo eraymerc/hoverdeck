@@ -111,6 +111,7 @@ export namespace hvr {
 	    name: string;
 	    net: string;
 	    span: Span;
+	    ref: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new Pin(source);
@@ -122,6 +123,7 @@ export namespace hvr {
 	        this.name = source["name"];
 	        this.net = source["net"];
 	        this.span = this.convertValues(source["span"], Span);
+	        this.ref = source["ref"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

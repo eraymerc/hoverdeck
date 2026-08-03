@@ -17,6 +17,10 @@ export interface Pin {
   name: string;
   net: string;
   span: Span;
+  // True when `net` is a dotted reference to another element's branch
+  // (CCCS/CCVS's "sense" port) rather than an actual net — no wire should
+  // be drawn for it.
+  ref: boolean;
 }
 
 export interface DefRef {

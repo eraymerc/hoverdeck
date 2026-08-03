@@ -51,6 +51,8 @@ interface PinGeom {
   dir: 'left' | 'right' | 'up' | 'down';
   /** Which block this pin belongs to — pairs with `index` to form legKey. */
   blockId: string;
+  /** True for a dotted element reference (CCCS/CCVS's "sense" pin) — no wire. */
+  ref: boolean;
 }
 
 /** "blockID:pinIndex" — must match hvr.LegKey on the Go side exactly. */
@@ -355,7 +357,7 @@ export class Canvas {
           x = g.x + (w - span) / 2 + slot * PIN_SPACING;
           y = dir === 'up' ? g.y : g.y + g.h;
         }
-        g.pins.push({ index: p.index, name: p.name, net: p.net, x, y, dir, blockId: b.id });
+        g.pins.push({ index: p.index, name: p.name, net: p.net, x, y, dir, blockId: b.id, ref: p.ref });
       });
 
       this.geoms.set(b.id, g);
@@ -613,6 +615,18 @@ export class Canvas {
           case 'right': tx = p.x - 7; anchor = 'end';   break;
           case 'up':    ty = p.y + 12; anchor = 'middle'; break;
           case 'down':  ty = p.y - 6;  anchor = 'middle'; break;
+        }
+        // A ref pin (CCCS/CCVS's "sense") names another element rather than
+        // a net — no wire is ever drawn for it, so it gets its own dot style
+        // plus a tooltip revealing what it points at instead of a data-net
+        // hookup that would only ever miss.
+        if (p.ref) {
+          return (
+            `<g>` +
+            `<circle class="pin-dot pin-ref" cx="${p.x}" cy="${p.y}" r="3.5"><title>senses ${esc(p.net)}</title></circle>` +
+            `<text class="pin-name" x="${tx}" y="${ty}" text-anchor="${anchor}">${esc(p.name)}</text>` +
+            `</g>`
+          );
         }
         return (
           `<g data-net="${esc(p.net)}">` +
