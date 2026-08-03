@@ -515,6 +515,16 @@ func (a *App) SetNetTrunk(module, net string, x, dy float64) error {
 	return a.layout.Save(a.entry)
 }
 
+// SetLegOffset moves one leg of a net vertically, independent of its other
+// legs. legKey identifies the leg as "blockID:pinIndex" (see hvr.LegKey).
+func (a *App) SetLegOffset(module, net, legKey string, dy float64) error {
+	if a.layout == nil {
+		return fmt.Errorf("no project open")
+	}
+	a.layout.SetLegDY(module, net, legKey, dy)
+	return a.layout.Save(a.entry)
+}
+
 // SetBlockTransform rotates and/or mirrors a block on the canvas. This is
 // presentation only — the netlist is unchanged.
 func (a *App) SetBlockTransform(module, blockID string, rot int, flipX, flipY bool) error {

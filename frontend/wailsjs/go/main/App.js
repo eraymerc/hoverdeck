@@ -170,6 +170,10 @@ export function SetBlockTransform(arg1, arg2, arg3, arg4, arg5) {
   return window['go']['main']['App']['SetBlockTransform'](arg1, arg2, arg3, arg4, arg5);
 }
 
+export function SetLegOffset(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['SetLegOffset'](arg1, arg2, arg3, arg4);
+}
+
 export function SetNetColor(arg1, arg2, arg3) {
   return window['go']['main']['App']['SetNetColor'](arg1, arg2, arg3);
 }

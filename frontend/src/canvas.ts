@@ -29,6 +29,7 @@ export interface CanvasHandlers {
   onMoveBlock(id: string, x: number, y: number): void;
   onMoveSignal(name: string, x: number, y: number): void;
   onMoveNetTrunk(net: string, x: number, dy: number): void;
+  onMoveLeg(net: string, legKey: string, dy: number): void;
   onDropCatalog(payload: string, x: number, y: number): void;
 }
 
@@ -48,6 +49,13 @@ interface PinGeom {
   x: number;
   y: number;
   dir: 'left' | 'right' | 'up' | 'down';
+  /** Which block this pin belongs to — pairs with `index` to form legKey. */
+  blockId: string;
+}
+
+/** "blockID:pinIndex" — must match hvr.LegKey on the Go side exactly. */
+function legKeyOf(p: PinGeom): string {
+  return `${p.blockId}:${p.index}`;
 }
 
 /** Unit vector a pin's stub leaves along. */
@@ -199,7 +207,8 @@ export class Canvas {
 
     this.svg.addEventListener('pointerdown', (e) => {
       const target = e.target as Element;
-      if (target.closest('.block') || target.closest('.chip') || target.closest('[data-trunk]')) return;
+      if (target.closest('.block') || target.closest('.chip') ||
+          target.closest('[data-trunk]') || target.closest('[data-trunk-y]')) return;
 
       // Clicking empty canvas clears the selection.
       if (!target.closest('.net-label') && !target.closest('.pin-hit')) {
@@ -346,7 +355,7 @@ export class Canvas {
           x = g.x + (w - span) / 2 + slot * PIN_SPACING;
           y = dir === 'up' ? g.y : g.y + g.h;
         }
-        g.pins.push({ index: p.index, name: p.name, net: p.net, x, y, dir });
+        g.pins.push({ index: p.index, name: p.name, net: p.net, x, y, dir, blockId: b.id });
       });
 
       this.geoms.set(b.id, g);
@@ -428,20 +437,37 @@ export class Canvas {
       const trunkX = net.hasTrunk ? net.trunkX : auto;
       const dy = net.trunkDY || 0;
 
+      // First pass: work out each leg's path without emitting anything yet.
+      // The trunk's own vertical extent depends on every leg's join point,
+      // so its path can't be built until all of them are known.
+      //
+      // Each leg's own offset is dy (the net's bulk shift) PLUS its own
+      // legDY entry — the two are independent, additive knobs: dragging the
+      // trunk moves every leg together, dragging one leg nudges only that
+      // leg on top of wherever the trunk already put it. Without a per-leg
+      // term here, every leg would be forced to share the exact same
+      // vertical offset, and dragging any one of them would inevitably drag
+      // all the others along with it — no way to move just one connection.
+      const legPaths: { d: string; legKey: string; pinned: boolean }[] = [];
       const joinYs: number[] = [];
       for (const s of stubEnds) {
         const p = s.pin;
+        const legKey = legKeyOf(p);
+        const legDy = net.legDY[legKey] || 0;
+        const totalDy = dy + legDy;
+        const pinned = legDy !== 0;
+
         const horizontal = s.dir === 'left' || s.dir === 'right';
-        const jointY = s.y + dy;
+        const jointY = s.y + totalDy;
 
         // With no manual offset a side pin runs straight across, unless the
         // channel sits behind it — in which case route around the block
         // rather than drawing back over it.
-        const doublesBack = horizontal && dy === 0 &&
+        const doublesBack = horizontal && totalDy === 0 &&
           ((s.dir === 'right' && trunkX < s.x) || (s.dir === 'left' && trunkX > s.x));
 
-        if (horizontal && dy === 0 && !doublesBack) {
-          out.push(`<path class="wire" data-net="${esc(net.name)}" d="M${p.x} ${p.y} H${trunkX}"/>`);
+        if (horizontal && totalDy === 0 && !doublesBack) {
+          legPaths.push({ d: `M${p.x} ${p.y} H${trunkX}`, legKey, pinned });
           joinYs.push(p.y);
           continue;
         }
@@ -449,32 +475,41 @@ export class Canvas {
           const g = this.geomOfPin(p);
           const above = g ? p.y < g.y + g.h / 2 : true;
           const detourY = g ? (above ? g.y - 14 : g.y + g.h + 14) : p.y - 14;
-          out.push(
-            `<path class="wire" data-net="${esc(net.name)}" ` +
-            `d="M${p.x} ${p.y} H${s.x} V${detourY} H${trunkX}"/>`,
-          );
+          legPaths.push({ d: `M${p.x} ${p.y} H${s.x} V${detourY} H${trunkX}`, legKey, pinned });
           joinYs.push(detourY);
           continue;
         }
 
         // General case: out along the stub, vertically to the joint, then
         // across to the channel. Always orthogonal for any pin direction.
-        out.push(
-          `<path class="wire" data-net="${esc(net.name)}" ` +
-          `d="M${p.x} ${p.y} L${s.x} ${s.y} V${jointY} H${trunkX}"/>`,
-        );
+        legPaths.push({ d: `M${p.x} ${p.y} L${s.x} ${s.y} V${jointY} H${trunkX}`, legKey, pinned });
         joinYs.push(jointY);
       }
 
       const minY = Math.min(...joinYs);
       const maxY = Math.max(...joinYs);
+
+      // Trunk is drawn — and its grab handle wired — before any leg, so
+      // every leg (painted after, later in the DOM) sits on top of it for
+      // hit-testing. This matters whenever a leg runs parallel to and
+      // coincides with the trunk, which happens whenever a pin's stub
+      // already lines up with trunkX (any straight-through vertical pin,
+      // for instance): without this ordering the trunk's invisible grip
+      // would sit on top along that entire shared run, not just at a
+      // corner, and grabbing anywhere on what looks like "just that wire"
+      // would always drag the whole net's trunk instead.
       if (maxY > minY) {
-        // The trunk is the grab handle for re-routing the net. A transparent
-        // wide stroke sits under it so it can be grabbed without precision.
         out.push(
           `<path class="trunk-grip" data-trunk="${esc(net.name)}" d="M${trunkX} ${minY} V${maxY}"/>` +
           `<path class="wire trunk${net.hasTrunk ? ' pinned' : ''}" data-net="${esc(net.name)}" ` +
           `data-trunk="${esc(net.name)}" d="M${trunkX} ${minY} V${maxY}"/>`,
+        );
+      }
+      for (const leg of legPaths) {
+        out.push(
+          `<path class="trunk-grip-y" data-trunk-y="${esc(net.name)}" data-leg="${esc(leg.legKey)}" d="${leg.d}"/>` +
+          `<path class="wire${leg.pinned ? ' pinned' : ''}" data-net="${esc(net.name)}" ` +
+          `data-trunk-y="${esc(net.name)}" data-leg="${esc(leg.legKey)}" d="${leg.d}"/>`,
         );
       }
       // Junction dots wherever three or more segments meet.
@@ -653,6 +688,49 @@ export class Canvas {
           window.removeEventListener('pointermove', move);
           window.removeEventListener('pointerup', up);
           if (moved) this.h.onMoveNetTrunk(name, net.trunkX, net.trunkDY);
+          else this.select(null, name, null);
+        };
+        window.addEventListener('pointermove', move);
+        window.addEventListener('pointerup', up);
+      });
+    });
+
+    // Horizontal leg re-routing: drag a leg vertically to lift it clear of
+    // whatever it crosses. A leg's horizontal position is pinned to the pin
+    // it comes from, so only Y dragging means anything here — hence a
+    // separate handler with an ns-resize cursor rather than reusing the
+    // trunk's 2-axis one.
+    //
+    // This adjusts the LEG's own offset (net.legDY[legKey]), not the net's
+    // shared trunkDY — that is what keeps dragging one leg from dragging
+    // every other leg of the same net along with it. Dragging the trunk
+    // itself (the other handler, above) still moves every leg together, as
+    // a deliberate bulk shift; this one is the independent, single-leg move.
+    this.root.querySelectorAll('[data-trunk-y]').forEach((el) => {
+      el.addEventListener('pointerdown', (ev) => {
+        const e = ev as PointerEvent;
+        e.stopPropagation();
+        e.preventDefault();
+        const name = (el as SVGElement).dataset.trunkY!;
+        const legKey = (el as SVGElement).dataset.leg!;
+        const net = this.sheet?.nets.find((n) => n.name === name);
+        if (!net) return;
+
+        const startY = e.clientY;
+        const originDY = net.legDY[legKey] || 0;
+        let moved = false;
+
+        const move = (me: PointerEvent) => {
+          const dy = (me.clientY - startY) / this.scale;
+          if (!moved && Math.abs(dy) < 2) return;
+          moved = true;
+          net.legDY = { ...net.legDY, [legKey]: Math.round((originDY + dy) / 8) * 8 };
+          this.render(this.sheet);
+        };
+        const up = () => {
+          window.removeEventListener('pointermove', move);
+          window.removeEventListener('pointerup', up);
+          if (moved) this.h.onMoveLeg(name, legKey, net.legDY[legKey]);
           else this.select(null, name, null);
         };
         window.addEventListener('pointermove', move);

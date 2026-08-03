@@ -411,6 +411,7 @@ export namespace hvr {
 	    trunkDY: number;
 	    hasTrunk: boolean;
 	    color?: string;
+	    legDY: Record<string, number>;
 	
 	    static createFrom(source: any = {}) {
 	        return new Net(source);
@@ -428,6 +429,7 @@ export namespace hvr {
 	        this.trunkDY = source["trunkDY"];
 	        this.hasTrunk = source["hasTrunk"];
 	        this.color = source["color"];
+	        this.legDY = source["legDY"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

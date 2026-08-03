@@ -84,6 +84,12 @@ export interface Net {
   trunkDY: number;
   hasTrunk: boolean;
   color?: string;
+  // Per-leg vertical offset, keyed by "blockID:pinIndex" (see hvr.LegKey),
+  // added on top of trunkDY so one connection can move independently of
+  // the net's other legs. Nullable per the same nil-map-marshals-to-null
+  // rule as the slice fields elsewhere in this file — normalizeSheet fills
+  // in {} for the null case, same treatment as everything else here.
+  legDY: Record<string, number> | null;
 }
 
 export interface Signal {
@@ -132,7 +138,7 @@ export type SafeBlock = Omit<Block, 'params' | 'logic' | 'pins' | 'logicPorts'> 
   logicPorts: LogicPort[];
 };
 
-export type SafeNet = Omit<Net, 'pins'> & { pins: NetPin[] };
+export type SafeNet = Omit<Net, 'pins' | 'legDY'> & { pins: NetPin[]; legDY: Record<string, number> };
 
 export type SafeSheet = Omit<Sheet,
   'blocks' | 'nets' | 'signals' | 'physPorts' | 'logicPorts' | 'errors'> & {
@@ -155,7 +161,7 @@ export function normalizeSheet(s: Sheet): SafeSheet {
       pins: b.pins ?? [],
       logicPorts: b.logicPorts ?? [],
     })),
-    nets: (s.nets ?? []).map((n) => ({ ...n, pins: n.pins ?? [] })),
+    nets: (s.nets ?? []).map((n) => ({ ...n, pins: n.pins ?? [], legDY: n.legDY ?? {} })),
     signals: s.signals ?? [],
     physPorts: s.physPorts ?? [],
     logicPorts: s.logicPorts ?? [],

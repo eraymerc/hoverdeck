@@ -88,6 +88,8 @@ export function SetBlockPosition(arg1:string,arg2:string,arg3:number,arg4:number
 
 export function SetBlockTransform(arg1:string,arg2:string,arg3:number,arg4:boolean,arg5:boolean):Promise<void>;
 
+export function SetLegOffset(arg1:string,arg2:string,arg3:string,arg4:number):Promise<void>;
+
 export function SetNetColor(arg1:string,arg2:string,arg3:string):Promise<void>;
 
 export function SetNetTrunk(arg1:string,arg2:string,arg3:number,arg4:number):Promise<void>;

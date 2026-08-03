@@ -95,6 +95,20 @@ type Net struct {
 	TrunkDY  float64 `json:"trunkDY"`
 	HasTrunk bool    `json:"hasTrunk"`
 	Color    string  `json:"color,omitempty"`
+
+	// LegDY holds a per-leg vertical offset, keyed by "blockID:pinIndex",
+	// added on top of TrunkDY. TrunkDY moves every leg of the net together
+	// (a bulk shift); LegDY lets one specific connection be nudged clear of
+	// an obstacle without dragging every other leg along with it. Always
+	// non-nil so it marshals as `{}` rather than `null` when empty.
+	LegDY map[string]float64 `json:"legDY"`
+}
+
+// LegKey identifies one leg of a net for LegDY: the block and pin it comes
+// from. Stable across re-renders as long as the instance name and port order
+// in the source don't change.
+func LegKey(blockID string, pinIndex int) string {
+	return fmt.Sprintf("%s:%d", blockID, pinIndex)
 }
 
 // Signal is a non-wire declaration inside the module: a logic value or,
@@ -180,6 +194,7 @@ func (p *Project) BuildSheet(qualified string) (*Sheet, error) {
 			IsGround:   name == "gnd",
 			IsBoundary: boundary[name],
 			Pins:       []NetPin{},
+			LegDY:      map[string]float64{},
 		}
 		nets[name] = n
 		return n

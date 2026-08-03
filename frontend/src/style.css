@@ -205,11 +205,18 @@ body.resizing-v { cursor: row-resize; user-select: none; }
 .run-dot.err  { background: var(--danger); }
 @keyframes pulse { 50% { opacity: .3; } }
 
-/* Draggable wire trunk */
+/* Draggable wire trunk (the vertical routing channel) — drag sideways. */
 .wire.trunk { cursor: ew-resize; }
 .wire.trunk:hover { stroke: var(--wire-hi); stroke-width: 3; }
 .wire.pinned { stroke-dasharray: none; }
 .trunk-grip { stroke: transparent; stroke-width: 11; fill: none; cursor: ew-resize; }
+
+/* Draggable horizontal wire legs — drag vertically to lift them clear of
+   whatever they cross. A leg's horizontal position is pinned to the pin it
+   comes from, so the cursor is the vertical counterpart of the trunk's. */
+.wire[data-trunk-y] { cursor: ns-resize; }
+.wire[data-trunk-y]:hover { stroke: var(--wire-hi); stroke-width: 2.4; }
+.trunk-grip-y { stroke: transparent; stroke-width: 11; fill: none; cursor: ns-resize; }
 
 .pane {
   min-width: 0;

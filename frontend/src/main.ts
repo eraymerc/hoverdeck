@@ -145,6 +145,9 @@ function shell() {
     onMoveNetTrunk: (net, x, dy) => {
       if (state.sheet) API.SetNetTrunk(state.sheet.qualified, net, x, dy).catch(showErr);
     },
+    onMoveLeg: (net, legKey, dy) => {
+      if (state.sheet) API.SetLegOffset(state.sheet.qualified, net, legKey, dy).catch(showErr);
+    },
     onDropCatalog: (payload, x, y) => onDrop(payload, x, y),
   });
 

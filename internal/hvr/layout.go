@@ -53,8 +53,16 @@ type NetLayout struct {
 	// TrunkDY shifts where the horizontal runs meet the trunk, relative to
 	// the pins they come from. Together with TrunkX this lets a wire be
 	// dragged in both axes: X moves the vertical channel, Y lifts the
-	// horizontal legs clear of whatever they were crossing.
+	// horizontal legs clear of whatever they were crossing. TrunkDY moves
+	// every leg of the net together, as a bulk shift.
 	TrunkDY *float64 `json:"trunkDY,omitempty"`
+
+	// Legs holds a per-leg vertical offset, keyed by "blockID:pinIndex" (see
+	// LegKey), added on top of TrunkDY. This is what lets one connection be
+	// pulled clear of an obstacle independently of the net's other legs —
+	// without it every leg would only ever be able to move in lockstep via
+	// the single shared TrunkDY.
+	Legs map[string]float64 `json:"legs,omitempty"`
 }
 
 // LayoutPath returns the sidecar path for an entry file:
@@ -154,11 +162,16 @@ func (l *Layout) Apply(sh *Sheet) {
 			if nl.TrunkDY != nil {
 				n.TrunkDY = *nl.TrunkDY
 			}
+			for k, v := range nl.Legs {
+				n.LegDY[k] = v
+			}
 		}
 	}
 }
 
-// SetNetTrunk pins a net's routing channel in both axes.
+// SetNetTrunk pins a net's routing channel in both axes. This is a bulk
+// move — it shifts every leg of the net together via the shared TrunkDY;
+// see SetLegDY to move one leg independently.
 func (l *Layout) SetNetTrunk(module, net string, x, dy float64) {
 	s := l.Sheet(module)
 	n, ok := s.Nets[net]
@@ -169,6 +182,21 @@ func (l *Layout) SetNetTrunk(module, net string, x, dy float64) {
 	vx, vy := x, dy
 	n.TrunkX = &vx
 	n.TrunkDY = &vy
+}
+
+// SetLegDY offsets one leg of a net vertically, independent of its other
+// legs and of the net's own TrunkDY bulk shift.
+func (l *Layout) SetLegDY(module, net, legKey string, dy float64) {
+	s := l.Sheet(module)
+	n, ok := s.Nets[net]
+	if !ok {
+		n = &NetLayout{}
+		s.Nets[net] = n
+	}
+	if n.Legs == nil {
+		n.Legs = map[string]float64{}
+	}
+	n.Legs[legKey] = dy
 }
 
 // SetBlockTransform records a block's orientation.
@@ -187,12 +215,14 @@ func (l *Layout) SetBlockTransform(module, blockID string, rot int, flipX, flipY
 	b.Rot, b.FlipX, b.FlipY = rot, flipX, flipY
 }
 
-// ClearNetTrunk returns a net to automatic routing.
+// ClearNetTrunk returns a net to fully automatic routing — both the bulk
+// TrunkX/TrunkDY shift and any per-leg offsets are forgotten.
 func (l *Layout) ClearNetTrunk(module, net string) {
 	s := l.Sheet(module)
 	if n, ok := s.Nets[net]; ok {
 		n.TrunkX = nil
 		n.TrunkDY = nil
+		n.Legs = nil
 	}
 }
 

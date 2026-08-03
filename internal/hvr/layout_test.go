@@ -172,6 +172,94 @@ func TestNetTrunkStoresBothAxes(t *testing.T) {
 	}
 }
 
+func TestLegDYMovesOneLegIndependently(t *testing.T) {
+	entry := writeTemp(t, map[string]string{"main.hvr": layoutSrc})
+	p, _ := LoadProject(entry, "")
+	sh, _ := p.BuildSheet("main")
+
+	// Net "n" has two legs: the voltage source's n+ pin (V1:0) and R's n+
+	// pin (R1:0). Moving one must not move the other — that independence
+	// is the entire point of LegDY existing separately from TrunkDY.
+	l := LoadLayout(entry)
+	l.SetLegDY("main", "n", "V1:0", 40)
+	if err := l.Save(entry); err != nil {
+		t.Fatal(err)
+	}
+
+	l2 := LoadLayout(entry)
+	l2.Apply(sh)
+
+	var got *Net
+	for i := range sh.Nets {
+		if sh.Nets[i].Name == "n" {
+			got = &sh.Nets[i]
+		}
+	}
+	if got == nil {
+		t.Fatal("net n missing from the sheet")
+	}
+	if got.LegDY["V1:0"] != 40 {
+		t.Errorf("V1:0 offset: got %v, want 40", got.LegDY["V1:0"])
+	}
+	if got.LegDY["R1:0"] != 0 {
+		t.Errorf("R1:0 should be untouched, got %v", got.LegDY["R1:0"])
+	}
+
+	// Setting the net's bulk TrunkDY must not disturb the per-leg offset
+	// already recorded for V1:0 — the two are independent, additive knobs.
+	l2.SetNetTrunk("main", "n", got.TrunkX, 10)
+	l2.Apply(sh)
+	for i := range sh.Nets {
+		if sh.Nets[i].Name != "n" {
+			continue
+		}
+		if sh.Nets[i].TrunkDY != 10 {
+			t.Errorf("bulk TrunkDY: got %v, want 10", sh.Nets[i].TrunkDY)
+		}
+		if sh.Nets[i].LegDY["V1:0"] != 40 {
+			t.Errorf("per-leg offset should survive a bulk trunk move, got %v", sh.Nets[i].LegDY["V1:0"])
+		}
+	}
+}
+
+func TestLegDYNeverSerialisesAsNull(t *testing.T) {
+	entry := writeTemp(t, map[string]string{"main.hvr": layoutSrc})
+	p, _ := LoadProject(entry, "")
+	sh, err := p.BuildSheet("main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range sh.Nets {
+		if n.LegDY == nil {
+			t.Errorf("net %q: LegDY is nil, which marshals to JSON null and breaks the frontend", n.Name)
+		}
+	}
+}
+
+func TestClearNetTrunkAlsoClearsLegOffsets(t *testing.T) {
+	entry := writeTemp(t, map[string]string{"main.hvr": layoutSrc})
+	p, _ := LoadProject(entry, "")
+	sh, _ := p.BuildSheet("main")
+
+	l := LoadLayout(entry)
+	l.SetNetTrunk("main", "n", 400, 20)
+	l.SetLegDY("main", "n", "V1:0", 40)
+	l.ClearNetTrunk("main", "n")
+	l.Apply(sh)
+
+	for _, n := range sh.Nets {
+		if n.Name != "n" {
+			continue
+		}
+		if n.HasTrunk {
+			t.Error("clearing should drop the hand-placed trunk")
+		}
+		if len(n.LegDY) != 0 {
+			t.Errorf("clearing should drop per-leg offsets too, got %v", n.LegDY)
+		}
+	}
+}
+
 func TestCorruptSidecarIsIgnored(t *testing.T) {
 	entry := writeTemp(t, map[string]string{"main.hvr": layoutSrc})
 	if err := WriteFile(LayoutPath(entry), "{ this is not json"); err != nil {
