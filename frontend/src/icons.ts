@@ -106,22 +106,22 @@ const SYMBOLS: Record<string, string> = {
 
   filter:
     `<path d="M0 ${CY} H8 M40 ${CY} H48"/>` +
-    `<rect x="8" y="6" width="32" height="16" rx="2"/>` +
+    `<rect x="8" y="6" width="32" height="16"/>` +
     `<path d="M12 20 C20 20 20 10 28 10 L36 10"/>`,
 
   // ── Domain fallbacks ──────────────────────────────────────────────────────
   analog:
     `<path d="M0 ${CY} H8 M40 ${CY} H48"/>` +
-    `<rect x="8" y="5" width="32" height="18" rx="3"/>` +
+    `<rect x="8" y="5" width="32" height="18"/>` +
     `<path d="M13 ${CY} c4 -8 8 8 12 0 c4 -8 8 8 10 0"/>`,
 
   digital:
     `<path d="M0 ${CY} H8 M40 ${CY} H48"/>` +
-    `<rect x="8" y="5" width="32" height="18" rx="3"/>` +
+    `<rect x="8" y="5" width="32" height="18"/>` +
     `<path d="M13 19 v-5 h6 v-5 h6 v10 h6 v-5"/>`,
 
   structural:
-    `<rect x="6" y="5" width="36" height="18" rx="3"/>` +
+    `<rect x="6" y="5" width="36" height="18"/>` +
     `<path d="M6 11 H0 M6 17 H0 M42 11 H48 M42 17 H48"/>`,
 };
 
@@ -134,7 +134,7 @@ export const ICON_IDS = Object.keys(SYMBOLS);
 export function iconSvg(id: string, cls = ''): string {
   const body = SYMBOLS[id] ?? SYMBOLS.structural;
   return `<svg class="sym ${cls}" viewBox="0 0 ${W} ${H}" width="48" height="28"
-     fill="none" stroke="currentColor" stroke-width="1.6"
+     fill="none" stroke="currentColor" stroke-width="1.8"
      stroke-linecap="round" stroke-linejoin="round">${body}</svg>`;
 }
 

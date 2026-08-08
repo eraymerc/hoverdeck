@@ -244,7 +244,9 @@ export namespace hvr {
 	    desc: string;
 	    group: string;
 	    importPath: string;
+	    qualifier: string;
 	    suggestAlias: string;
+	    package: string;
 	    physPorts: string[];
 	    staticParams: StaticParam[];
 	    logicPorts: LogicPort[];
@@ -264,7 +266,9 @@ export namespace hvr {
 	        this.desc = source["desc"];
 	        this.group = source["group"];
 	        this.importPath = source["importPath"];
+	        this.qualifier = source["qualifier"];
 	        this.suggestAlias = source["suggestAlias"];
+	        this.package = source["package"];
 	        this.physPorts = source["physPorts"];
 	        this.staticParams = this.convertValues(source["staticParams"], StaticParam);
 	        this.logicPorts = this.convertValues(source["logicPorts"], LogicPort);
@@ -298,6 +302,7 @@ export namespace hvr {
 	    typeName: string;
 	    alias: string;
 	    importPath: string;
+	    qualifier: string;
 	    instance: string;
 	    static: string;
 	    logic: string;
@@ -315,6 +320,7 @@ export namespace hvr {
 	        this.typeName = source["typeName"];
 	        this.alias = source["alias"];
 	        this.importPath = source["importPath"];
+	        this.qualifier = source["qualifier"];
 	        this.instance = source["instance"];
 	        this.static = source["static"];
 	        this.logic = source["logic"];
@@ -326,6 +332,7 @@ export namespace hvr {
 	    text: string;
 	    importAdded: boolean;
 	    instanceName: string;
+	    qualifier: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new InsertResult(source);
@@ -337,6 +344,7 @@ export namespace hvr {
 	        this.text = source["text"];
 	        this.importAdded = source["importAdded"];
 	        this.instanceName = source["instanceName"];
+	        this.qualifier = source["qualifier"];
 	    }
 	}
 	
@@ -453,6 +461,24 @@ export namespace hvr {
 		}
 	}
 	
+	export class Packages {
+	    roots: Record<string, string>;
+	    bundled: string;
+	    stdlibInstalled: boolean;
+	    note: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Packages(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.roots = source["roots"];
+	        this.bundled = source["bundled"];
+	        this.stdlibInstalled = source["stdlibInstalled"];
+	        this.note = source["note"];
+	    }
+	}
 	
 	export class PrimitiveDef {
 	    name: string;
@@ -621,7 +647,7 @@ export namespace main {
 	    path: string;
 	    name: string;
 	    isEntry: boolean;
-	    isStdlib: boolean;
+	    package: string;
 	    lines: number;
 	    errors: number;
 	
@@ -634,7 +660,7 @@ export namespace main {
 	        this.path = source["path"];
 	        this.name = source["name"];
 	        this.isEntry = source["isEntry"];
-	        this.isStdlib = source["isStdlib"];
+	        this.package = source["package"];
 	        this.lines = source["lines"];
 	        this.errors = source["errors"];
 	    }
@@ -696,7 +722,7 @@ export namespace main {
 	export class ProjectInfo {
 	    entry: string;
 	    root: string;
-	    stdlibRoot: string;
+	    packages?: hvr.Packages;
 	    layoutPath: string;
 	    files: FileInfo[];
 	    modules: hvr.ModuleDef[];
@@ -712,7 +738,7 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.entry = source["entry"];
 	        this.root = source["root"];
-	        this.stdlibRoot = source["stdlibRoot"];
+	        this.packages = this.convertValues(source["packages"], hvr.Packages);
 	        this.layoutPath = source["layoutPath"];
 	        this.files = this.convertValues(source["files"], FileInfo);
 	        this.modules = this.convertValues(source["modules"], hvr.ModuleDef);
@@ -742,13 +768,15 @@ export namespace main {
 	export class SettingsView {
 	    hoverBin: string;
 	    workDir: string;
-	    stdlibRoot: string;
 	    configPath: string;
 	    binOK: boolean;
 	    runtimeOK: boolean;
+	    stdlibOK: boolean;
+	    needsSetup: boolean;
 	    effectiveBin: string;
 	    effectiveWork: string;
 	    detected: string;
+	    packages: number;
 	    note: string;
 	
 	    static createFrom(source: any = {}) {
@@ -759,13 +787,15 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.hoverBin = source["hoverBin"];
 	        this.workDir = source["workDir"];
-	        this.stdlibRoot = source["stdlibRoot"];
 	        this.configPath = source["configPath"];
 	        this.binOK = source["binOK"];
 	        this.runtimeOK = source["runtimeOK"];
+	        this.stdlibOK = source["stdlibOK"];
+	        this.needsSetup = source["needsSetup"];
 	        this.effectiveBin = source["effectiveBin"];
 	        this.effectiveWork = source["effectiveWork"];
 	        this.detected = source["detected"];
+	        this.packages = source["packages"];
 	        this.note = source["note"];
 	    }
 	}

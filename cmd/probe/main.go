@@ -13,10 +13,15 @@ func main() {
 	if len(os.Args) > 2 {
 		mod = os.Args[2]
 	}
-	std := hvr.FindStdlib("../hover-lang")
-	fmt.Println("stdlib:", std)
+	// Same import table the app builds: the lockfiles that apply to this file,
+	// plus the stdlib bundled beside the compiler if $HOVER_BIN names one.
+	pkgs := hvr.ResolvePackages(entry, os.Getenv("HOVER_BIN"))
+	fmt.Println("packages:", pkgs.Names())
+	if pkgs.Note != "" {
+		fmt.Println("note:", pkgs.Note)
+	}
 
-	p, err := hvr.LoadProject(entry, std)
+	p, err := hvr.LoadProject(entry, pkgs)
 	if err != nil {
 		fmt.Println("load error:", err)
 		os.Exit(1)

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"hover/compiler/loader"
 )
 
 // PrimitiveDef describes one built-in physical primitive: what its static
@@ -97,14 +99,29 @@ func IconFor(bare, domain string) string {
 
 // CatalogEntry is one palette item: a module the user can drop onto a sheet.
 type CatalogEntry struct {
-	Kind         string        `json:"kind"` // "primitive" | "module"
-	Name         string        `json:"name"`
-	Icon         string        `json:"icon"`
-	Domain       string        `json:"domain"`
-	Desc         string        `json:"desc"`
-	Group        string        `json:"group"`
-	ImportPath   string        `json:"importPath"` // for `import <...>`, "" if none needed
-	SuggestAlias string        `json:"suggestAlias"`
+	Kind   string `json:"kind"` // "primitive" | "module"
+	Name   string `json:"name"`
+	Icon   string `json:"icon"`
+	Domain string `json:"domain"`
+	Desc   string `json:"desc"`
+	Group  string `json:"group"`
+
+	// ImportPath is the DIRECTORY to import, as written inside the angle
+	// brackets — "semiconductors", "math", "stdlib/semiconductors/bjt". Empty
+	// when nothing needs importing.
+	ImportPath string `json:"importPath"`
+
+	// Qualifier is the name that import binds, and therefore the prefix an
+	// instantiation writes: `semiconductors.Diode<...>`. Whole-directory
+	// imports are always qualified in 0.8, so this is never empty when
+	// ImportPath is set.
+	Qualifier string `json:"qualifier"`
+
+	// SuggestAlias pre-fills the `as` box. Empty means "the default binding
+	// is fine", which it is for every well-named directory.
+	SuggestAlias string `json:"suggestAlias"`
+
+	Package      string        `json:"package"`
 	PhysPorts    []string      `json:"physPorts"`
 	StaticParams []StaticParam `json:"staticParams"`
 	LogicPorts   []LogicPort   `json:"logicPorts"`
@@ -112,61 +129,39 @@ type CatalogEntry struct {
 	Snippet      string        `json:"snippet"`
 }
 
-// ScanStdlib walks the standard library and returns a palette entry for every
-// module it declares, pre-populated with its import path and default
-// arguments so dropping one produces a line that compiles as-is.
-func ScanStdlib(root string) []CatalogEntry {
+// ScanPackages returns a palette entry for every module declared by every
+// installed package, pre-populated with the import path, the qualifier that
+// import binds, and default arguments — so dropping one produces a line that
+// compiles as written.
+//
+// Grouped by DIRECTORY rather than by file, because a directory is the import
+// unit: `import <semiconductors>` brings in everything the palette shows under
+// "semiconductors", regardless of which file inside it declared what.
+func ScanPackages(pkgs *Packages) []CatalogEntry {
 	var out []CatalogEntry
-	if root == "" {
-		return out
-	}
-	if st, err := os.Stat(root); err != nil || !st.IsDir() {
+	if pkgs == nil {
 		return out
 	}
 
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(strings.ToLower(d.Name()), ".hvr") {
-			return nil
-		}
-		raw, readErr := os.ReadFile(path)
-		if readErr != nil {
-			return nil
-		}
-		f := ParseSource(path, string(raw))
-		if f.Program == nil {
-			return nil
-		}
-
-		rel, relErr := filepath.Rel(root, path)
-		if relErr != nil {
-			rel = filepath.Base(path)
-		}
-		importPath := filepath.ToSlash(rel)
-		group := filepath.ToSlash(filepath.Dir(rel))
-		if group == "." {
-			group = "standard library"
-		}
-
-		proj := &Project{Files: map[string]*File{path: f}, modules: map[string]*ModuleDef{}}
-		for _, def := range proj.modulesIn(f) {
-			e := CatalogEntry{
-				Kind:         "module",
-				Name:         def.Name,
-				Icon:         IconFor(def.Name, def.Domain),
-				Domain:       def.Domain,
-				Desc:         def.Doc,
-				Group:        group,
-				ImportPath:   importPath,
-				SuggestAlias: def.Name,
-				PhysPorts:    def.PhysPorts,
-				StaticParams: def.StaticParams,
-				LogicPorts:   def.LogicPorts,
-				File:         path,
+	// One directory can be reachable through more than one root — the stdlib
+	// tree binds both `stdlib` and `math`, and `<math>` is the spelling to
+	// offer. Scanning by directory and asking which package owns it (longest
+	// root wins) picks the more specific name and visits nothing twice.
+	seen := map[string]bool{}
+	for _, root := range pkgs.Roots {
+		_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || !d.IsDir() || strings.HasPrefix(d.Name(), ".") {
+				return nil
 			}
-			out = append(out, e)
-		}
-		return nil
-	})
+			dir := filepath.Clean(path)
+			if seen[dir] {
+				return nil
+			}
+			seen[dir] = true
+			out = append(out, scanDir(pkgs, dir)...)
+			return nil
+		})
+	}
 
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Group != out[j].Group {
@@ -177,57 +172,84 @@ func ScanStdlib(root string) []CatalogEntry {
 	return out
 }
 
-// FindStdlib locates a standard_library directory, trying the explicit hint
-// first, then locations relative to the running binary and the working
-// directory. Returns "" when none is found; `import <...>` then simply fails
-// to resolve and the UI reports it rather than silently showing an empty tree.
-func FindStdlib(hint string) string {
-	var cands []string
-	if hint != "" {
-		// The nested path is tried first: a hint pointing at a hover checkout
-		// should find <checkout>/standard_library, not the checkout itself.
-		cands = append(cands, filepath.Join(hint, "standard_library"), hint)
+// scanDir builds the palette entries for the .hvr files directly inside one
+// package directory.
+func scanDir(pkgs *Packages, dir string) []CatalogEntry {
+	files, err := loader.HvrFilesIn(dir)
+	if err != nil || len(files) == 0 {
+		return nil
 	}
-	if exe, err := os.Executable(); err == nil {
-		if real, e := filepath.EvalSymlinks(exe); e == nil {
-			exe = real
+
+	pkg := pkgs.PackageOf(dir)
+	if pkg == "" {
+		return nil
+	}
+	importPath := pkg
+	if rel, relErr := filepath.Rel(pkgs.Roots[pkg], dir); relErr == nil && rel != "." {
+		importPath = pkg + "/" + filepath.ToSlash(rel)
+	}
+	qualifier := loader.QualifierFor(importPath, "")
+
+	// A directory whose default binding is not a legal identifier needs an
+	// explicit `as`, so the palette offers one rather than letting the
+	// inserted line fail to lex at its first use.
+	suggest := ""
+	if !isIdent(qualifier) {
+		suggest = sanitizeIdent(qualifier)
+	}
+
+	var out []CatalogEntry
+	for _, path := range files {
+		raw, readErr := os.ReadFile(path)
+		if readErr != nil {
+			continue
 		}
-		dir := filepath.Dir(exe)
-		cands = append(cands,
-			filepath.Join(dir, "standard_library"),
-			filepath.Join(dir, "..", "hover-lang", "standard_library"),
-		)
-	}
-	if wd, err := os.Getwd(); err == nil {
-		cands = append(cands,
-			filepath.Join(wd, "standard_library"),
-			filepath.Join(wd, "..", "hover-lang", "standard_library"),
-		)
-	}
-	for _, c := range cands {
-		c = filepath.Clean(c)
-		if st, err := os.Stat(c); err == nil && st.IsDir() && containsHVR(c) {
-			return c
+		f := ParseSource(path, string(raw))
+		if f.Program == nil {
+			continue
+		}
+		proj := &Project{Files: map[string]*File{path: f}, modules: map[string]*ModuleDef{}}
+		for _, def := range proj.modulesIn(f) {
+			out = append(out, CatalogEntry{
+				Kind:         "module",
+				Name:         def.Name,
+				Icon:         IconFor(def.Name, def.Domain),
+				Domain:       def.Domain,
+				Desc:         def.Doc,
+				Group:        importPath,
+				ImportPath:   importPath,
+				Qualifier:    qualifier,
+				SuggestAlias: suggest,
+				Package:      pkg,
+				PhysPorts:    def.PhysPorts,
+				StaticParams: def.StaticParams,
+				LogicPorts:   def.LogicPorts,
+				File:         path,
+			})
 		}
 	}
-	return ""
+	return out
 }
 
-// containsHVR reports whether dir holds at least one .hvr file at any depth,
-// so a directory that merely exists is not mistaken for a standard library.
-func containsHVR(dir string) bool {
-	found := false
-	_ = filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
+func isIdent(s string) bool { return identRe.MatchString(s) }
+
+// sanitizeIdent turns a directory name that cannot be an identifier into one
+// that can, as a starting suggestion the user can overwrite.
+func sanitizeIdent(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c == '_':
+			b.WriteByte(c)
+		case c >= '0' && c <= '9' && b.Len() > 0:
+			b.WriteByte(c)
 		}
-		if !d.IsDir() && strings.HasSuffix(strings.ToLower(d.Name()), ".hvr") {
-			found = true
-			return filepath.SkipAll
-		}
-		return nil
-	})
-	return found
+	}
+	if b.Len() == 0 {
+		return "lib"
+	}
+	return b.String()
 }
 
 // primLabelPrefix maps a primitive to its conventional SPICE reference-designator

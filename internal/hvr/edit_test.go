@@ -38,7 +38,7 @@ module main<>() []
 
 func TestSheetNetsAndPins(t *testing.T) {
 	entry := writeTemp(t, map[string]string{"main.hvr": basicMain})
-	p, err := LoadProject(entry, "")
+	p, err := LoadProject(entry, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestParamSpansPreserveExactText(t *testing.T) {
 }
 `
 	entry := writeTemp(t, map[string]string{"main.hvr": src})
-	p, _ := LoadProject(entry, "")
+	p, _ := LoadProject(entry, nil)
 	sh, err := p.BuildSheet("main")
 	if err != nil {
 		t.Fatal(err)
@@ -121,7 +121,7 @@ func TestCommentsInsidePortListDoNotBreakScanning(t *testing.T) {
 }
 `
 	entry := writeTemp(t, map[string]string{"main.hvr": src})
-	p, _ := LoadProject(entry, "")
+	p, _ := LoadProject(entry, nil)
 	sh, err := p.BuildSheet("main")
 	if err != nil {
 		t.Fatal(err)
@@ -138,7 +138,7 @@ func TestCommentsInsidePortListDoNotBreakScanning(t *testing.T) {
 
 func TestInsertPrimitiveKeepsFileIntact(t *testing.T) {
 	entry := writeTemp(t, map[string]string{"main.hvr": basicMain})
-	p, _ := LoadProject(entry, "")
+	p, _ := LoadProject(entry, nil)
 
 	if _, err := p.InsertBlock(InsertRequest{
 		Module:   "main",
@@ -166,7 +166,7 @@ func TestInsertPrimitiveKeepsFileIntact(t *testing.T) {
 	}
 
 	// And the result must still parse with the real compiler front end.
-	p2, err := LoadProject(entry, "")
+	p2, err := LoadProject(entry, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,13 +179,16 @@ func TestInsertPrimitiveKeepsFileIntact(t *testing.T) {
 	}
 }
 
-func TestInsertModuleAddsImportOnce(t *testing.T) {
+// semisProject writes an entry file plus a `semis` package holding one Diode,
+// and returns the entry path and the import table that reaches it.
+func semisProject(t *testing.T) (string, *Packages) {
+	t.Helper()
 	dir := t.TempDir()
-	std := filepath.Join(dir, "std")
-	if err := os.MkdirAll(filepath.Join(std, "semis"), 0o755); err != nil {
+	semis := filepath.Join(dir, "std", "semis")
+	if err := os.MkdirAll(semis, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(std, "semis", "diode.hvr"), []byte(
+	if err := os.WriteFile(filepath.Join(semis, "diode.hvr"), []byte(
 		"analog module Diode<double Is>() [wire anode, wire cathode] {\n    current_source<>(Is)[anode, cathode];\n}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -193,18 +196,24 @@ func TestInsertModuleAddsImportOnce(t *testing.T) {
 	if err := os.WriteFile(entry, []byte(basicMain), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	return entry, &Packages{Roots: map[string]string{"semis": semis}, StdlibInstalled: true}
+}
 
+func TestInsertModuleAddsImportOnce(t *testing.T) {
+	entry, pkgs := semisProject(t)
+
+	// No alias: 0.8 binds the last path segment by default, so the palette
+	// does not have to invent a name and the statement reads `semis.Diode`.
 	req := InsertRequest{
 		Module:     "main",
 		Kind:       "module",
 		TypeName:   "Diode",
-		Alias:      "Diode",
-		ImportPath: "semis/diode.hvr",
+		ImportPath: "semis",
 		Static:     "1p",
 		Ports:      []string{"a", "b"},
 	}
 
-	p, _ := LoadProject(entry, std)
+	p, _ := LoadProject(entry, pkgs)
 	res, err := p.InsertBlock(req)
 	if err != nil {
 		t.Fatal(err)
@@ -214,15 +223,15 @@ func TestInsertModuleAddsImportOnce(t *testing.T) {
 	}
 
 	out := readFile(t, entry)
-	if !strings.Contains(out, "import <semis/diode.hvr> as Diode;") {
+	if !strings.Contains(out, "import <semis>;") {
 		t.Errorf("import missing:\n%s", out)
 	}
-	if !strings.Contains(out, "module diode = Diode.Diode<1p>()[a, b];") {
+	if !strings.Contains(out, "module diode = semis.Diode<1p>()[a, b];") {
 		t.Errorf("instantiation missing or malformed:\n%s", out)
 	}
 
 	// A second insert must reuse the existing import and pick a fresh name.
-	p2, err := LoadProject(entry, std)
+	p2, err := LoadProject(entry, pkgs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,14 +243,14 @@ func TestInsertModuleAddsImportOnce(t *testing.T) {
 		t.Error("import should not be added twice")
 	}
 	out2 := readFile(t, entry)
-	if strings.Count(out2, "import <semis/diode.hvr>") != 1 {
+	if strings.Count(out2, "import <semis>") != 1 {
 		t.Errorf("import duplicated:\n%s", out2)
 	}
 	if res2.InstanceName == res.InstanceName {
 		t.Errorf("instance name collision: both %q", res2.InstanceName)
 	}
 
-	p3, err := LoadProject(entry, std)
+	p3, err := LoadProject(entry, pkgs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,9 +265,166 @@ func TestInsertModuleAddsImportOnce(t *testing.T) {
 	}
 }
 
+// An import binds a qualifier and nothing else — the bare name must not
+// resolve. This is the 0.7 behaviour that 0.8 removed, and getting it wrong
+// would let the canvas show a block the compiler refuses to elaborate.
+func TestWholeDirectoryImportIsQualifiedOnly(t *testing.T) {
+	entry, pkgs := semisProject(t)
+	src := "import <semis>;\n\n" + basicMain
+	if err := os.WriteFile(entry, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := LoadProject(entry, pkgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := p.Module("semis.Diode"); !ok {
+		t.Error("semis.Diode should be visible behind its qualifier")
+	}
+	if _, ok := p.Module("Diode"); ok {
+		t.Error("Diode must NOT be visible bare — a whole-directory import binds nothing flat")
+	}
+}
+
+// `from <d> import X as Y;` is the one form that does put a name in the flat
+// namespace, under its local spelling.
+func TestSelectiveImportBindsLocalName(t *testing.T) {
+	entry, pkgs := semisProject(t)
+	src := "from <semis> import Diode as Rectifier;\n\n" + basicMain
+	if err := os.WriteFile(entry, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := LoadProject(entry, pkgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := p.Module("Rectifier"); !ok {
+		t.Error("Rectifier should be visible under its local name")
+	}
+	if _, ok := p.Module("semis.Diode"); ok {
+		t.Error("a selective import binds no qualifier")
+	}
+}
+
+// The entry file's own siblings are NOT loaded and NOT visible to it.
+//
+// Directory-shared namespaces apply to the files an import brings in together;
+// the entry is loaded alone, so its directory group contains only itself.
+// Checked against the compiler, which says "undeclared module 'Widget' —
+// modules visible: main" for exactly this arrangement. Getting this wrong in
+// the generous direction is the dangerous one: the canvas would resolve a
+// block that the build then rejects.
+func TestEntrySiblingsAreNotVisible(t *testing.T) {
+	entry := writeTemp(t, map[string]string{
+		"main.hvr": basicMain,
+		"parts.hvr": "analog module Widget<>() [wire p, wire n] {\n" +
+			"    R<1k>()[p, n];\n}\n",
+	})
+	p, err := LoadProject(entry, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := p.Module("Widget"); ok {
+		t.Error("a sibling of the entry is not loaded, so it cannot be visible")
+	}
+	if _, loaded := p.Files[filepath.Join(filepath.Dir(entry), "parts.hvr")]; loaded {
+		t.Error("an unimported sibling must not be loaded at all")
+	}
+	if errs := p.AllErrors(); len(errs) != 0 {
+		t.Errorf("unexpected errors: %v", errs)
+	}
+}
+
+// Inside a directory that WAS imported, siblings do share a namespace: the
+// import brings in every file at once, so a module declared in one is
+// reachable behind the qualifier regardless of which file declared it.
+func TestImportedDirectorySiblingsShareANamespace(t *testing.T) {
+	dir := t.TempDir()
+	lib := filepath.Join(dir, "lib")
+	if err := os.MkdirAll(lib, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(lib, "a.hvr"), []byte(
+		"analog module Alpha<>() [wire p, wire n] {\n    R<1k>()[p, n];\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(lib, "b.hvr"), []byte(
+		"analog module Beta<>() [wire p, wire n] {\n    C<1u>()[p, n];\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entry := filepath.Join(dir, "main.hvr")
+	if err := os.WriteFile(entry, []byte("import \"./lib\";\n\n"+basicMain), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := LoadProject(entry, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"lib.Alpha", "lib.Beta"} {
+		if _, ok := p.Module(want); !ok {
+			t.Errorf("%s should be visible — one import loads the whole directory", want)
+		}
+	}
+}
+
+// The 0.7 file spelling gets a migration message naming its replacement,
+// rather than an unresolved-directory error.
+func TestFileImportReportsTheDirectoryToWriteInstead(t *testing.T) {
+	entry, pkgs := semisProject(t)
+	src := "import <semis/diode.hvr>;\n\n" + basicMain
+	if err := os.WriteFile(entry, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := LoadProject(entry, pkgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(p.AllErrors(), "\n")
+	if !strings.Contains(joined, "write <semis> instead of <semis/diode.hvr>") {
+		t.Errorf("expected a migration hint naming the directory, got:\n%s", joined)
+	}
+}
+
+// Two spellings of one directory must not produce two imports of it.
+func TestImportIsNotDuplicatedUnderADifferentSpelling(t *testing.T) {
+	entry, pkgs := semisProject(t)
+	pkgs.Roots["kit"] = filepath.Dir(pkgs.Roots["semis"]) // <kit/semis> is <semis>
+	src := "import <kit/semis>;\n\n" + basicMain
+	if err := os.WriteFile(entry, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := LoadProject(entry, pkgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := p.InsertBlock(InsertRequest{
+		Module: "main", Kind: "module", TypeName: "Diode",
+		ImportPath: "semis", Static: "1p", Ports: []string{"a", "b"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ImportAdded {
+		t.Error("the directory is already imported, under another spelling")
+	}
+	out := readFile(t, entry)
+	if strings.Contains(out, "import <semis>") {
+		t.Errorf("a second import of the same directory was written:\n%s", out)
+	}
+	// The existing import decides the name, so the statement has to use it.
+	if !strings.Contains(out, "semis.Diode<1p>") {
+		t.Errorf("instantiation should use the existing qualifier:\n%s", out)
+	}
+}
+
 func TestRenameNetUpdatesUsesAndDeclaration(t *testing.T) {
 	entry := writeTemp(t, map[string]string{"main.hvr": basicMain})
-	p, _ := LoadProject(entry, "")
+	p, _ := LoadProject(entry, nil)
 
 	n, err := p.RenameNet("main", "b", "out_node")
 	if err != nil {
@@ -280,7 +446,7 @@ func TestRenameNetUpdatesUsesAndDeclaration(t *testing.T) {
 		t.Errorf("stale net name remains:\n%s", out)
 	}
 
-	p2, _ := LoadProject(entry, "")
+	p2, _ := LoadProject(entry, nil)
 	if errs := p2.AllErrors(); len(errs) != 0 {
 		t.Errorf("renamed source does not parse: %v", errs)
 	}
@@ -288,7 +454,7 @@ func TestRenameNetUpdatesUsesAndDeclaration(t *testing.T) {
 
 func TestRenameNetRejectsBadInput(t *testing.T) {
 	entry := writeTemp(t, map[string]string{"main.hvr": basicMain})
-	p, _ := LoadProject(entry, "")
+	p, _ := LoadProject(entry, nil)
 
 	if _, err := p.RenameNet("main", "b", "9bad"); err == nil {
 		t.Error("expected rejection of an identifier starting with a digit")
@@ -309,7 +475,7 @@ func TestRenameNetRejectsBadInput(t *testing.T) {
 
 func TestSetPortNetReplacesOnlyThatPort(t *testing.T) {
 	entry := writeTemp(t, map[string]string{"main.hvr": basicMain})
-	p, _ := LoadProject(entry, "")
+	p, _ := LoadProject(entry, nil)
 	sh, _ := p.BuildSheet("main")
 
 	var target Pin
@@ -332,7 +498,7 @@ func TestSetPortNetReplacesOnlyThatPort(t *testing.T) {
 
 func TestDeleteBlockRemovesWholeLine(t *testing.T) {
 	entry := writeTemp(t, map[string]string{"main.hvr": basicMain})
-	p, _ := LoadProject(entry, "")
+	p, _ := LoadProject(entry, nil)
 	sh, _ := p.BuildSheet("main")
 
 	var stmt Span
@@ -351,7 +517,7 @@ func TestDeleteBlockRemovesWholeLine(t *testing.T) {
 	if strings.Contains(out, "\n\n\n") {
 		t.Errorf("deletion left a blank hole:\n%s", out)
 	}
-	p2, _ := LoadProject(entry, "")
+	p2, _ := LoadProject(entry, nil)
 	if errs := p2.AllErrors(); len(errs) != 0 {
 		t.Errorf("source does not parse after delete: %v", errs)
 	}
@@ -368,39 +534,47 @@ func TestStaleSpanIsRejected(t *testing.T) {
 	}
 }
 
-func TestAliasedAndBareImportResolution(t *testing.T) {
+// A relative import names a directory too, and binds its last segment unless
+// `as` says otherwise.
+func TestRelativeImportQualifierDefaultAndAlias(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "parts.hvr"), []byte(
+	if err := os.MkdirAll(filepath.Join(dir, "parts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "parts", "widget.hvr"), []byte(
 		"analog module Widget<double k>() [wire p, wire n] {\n    R<k>()[p, n];\n}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	entry := filepath.Join(dir, "main.hvr")
 
-	// Bare import: reachable as "Widget".
+	// Default: the directory name is the qualifier.
 	if err := os.WriteFile(entry, []byte(
-		"import \"./parts.hvr\";\nmodule main<>() [] {\n    wire a;\n    module w = Widget<1k>()[a, gnd];\n}\n"), 0o644); err != nil {
+		"import \"./parts\";\nmodule main<>() [] {\n    wire a;\n    module w = parts.Widget<1k>()[a, gnd];\n}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	p, _ := LoadProject(entry, "")
-	if _, ok := p.Module("Widget"); !ok {
-		t.Error("bare import should expose Widget unqualified")
+	p, _ := LoadProject(entry, nil)
+	if _, ok := p.Module("parts.Widget"); !ok {
+		t.Error("a relative import should bind its last path segment")
+	}
+	if _, ok := p.Module("Widget"); ok {
+		t.Error("nothing from a whole-directory import lands in the flat namespace")
 	}
 	sh, _ := p.BuildSheet("main")
 	if !sh.Blocks[0].Def.Found {
-		t.Error("bare-imported instance did not resolve")
+		t.Error("qualified instance did not resolve")
 	}
 
-	// Aliased import: reachable only as "P.Widget".
+	// Aliased: reachable only as "P.Widget".
 	if err := os.WriteFile(entry, []byte(
-		"import \"./parts.hvr\" as P;\nmodule main<>() [] {\n    wire a;\n    module w = P.Widget<1k>()[a, gnd];\n}\n"), 0o644); err != nil {
+		"import \"./parts\" as P;\nmodule main<>() [] {\n    wire a;\n    module w = P.Widget<1k>()[a, gnd];\n}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	p2, _ := LoadProject(entry, "")
+	p2, _ := LoadProject(entry, nil)
 	if _, ok := p2.Module("P.Widget"); !ok {
 		t.Error("aliased import should expose P.Widget")
 	}
-	if _, ok := p2.Module("Widget"); ok {
-		t.Error("aliased import must NOT expose the bare name")
+	if _, ok := p2.Module("parts.Widget"); ok {
+		t.Error("`as` replaces the default binding, it does not add to it")
 	}
 	sh2, _ := p2.BuildSheet("main")
 	if !sh2.Blocks[0].Def.Found {
@@ -426,7 +600,7 @@ module main<>() [] {
 }
 `
 	entry := writeTemp(t, map[string]string{"main.hvr": src})
-	p, _ := LoadProject(entry, "")
+	p, _ := LoadProject(entry, nil)
 
 	sh, err := p.BuildSheet("Ctl")
 	if err != nil {
@@ -462,7 +636,7 @@ func TestDrivenSourceLogicArgCaptured(t *testing.T) {
 }
 `
 	entry := writeTemp(t, map[string]string{"main.hvr": src})
-	p, _ := LoadProject(entry, "")
+	p, _ := LoadProject(entry, nil)
 	sh, _ := p.BuildSheet("main")
 
 	b := sh.Blocks[0]
@@ -486,7 +660,7 @@ func TestSheetCollectionsAreNeverNilInJSON(t *testing.T) {
 }
 `
 	entry := writeTemp(t, map[string]string{"main.hvr": src})
-	p, _ := LoadProject(entry, "")
+	p, _ := LoadProject(entry, nil)
 	sh, err := p.BuildSheet("main")
 	if err != nil {
 		t.Fatal(err)
@@ -542,7 +716,7 @@ func TestSheetCollectionsAreNeverNilInJSON(t *testing.T) {
 func TestEmptyModuleProducesUsableSheet(t *testing.T) {
 	// The degenerate case: a module with nothing in it at all.
 	entry := writeTemp(t, map[string]string{"main.hvr": "module main<>() [] {\n}\n"})
-	p, _ := LoadProject(entry, "")
+	p, _ := LoadProject(entry, nil)
 	sh, err := p.BuildSheet("main")
 	if err != nil {
 		t.Fatal(err)

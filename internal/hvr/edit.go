@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"hover/compiler/ast"
+	"hover/compiler/loader"
 )
 
 // Edits are deliberately narrow. hoverdeck never regenerates a .hvr from the
@@ -53,34 +54,60 @@ func ValidateIdent(name string) error {
 	return nil
 }
 
+// reservedWords mirrors compiler/token.keywords, plus the two built-in
+// identifiers a body may read but must not shadow.
+//
+// `from` is deliberately absent: it starts an import only when a path
+// follows it, so it remains usable as an identifier — and naming the
+// terminals of a two-port `from`/`to` is natural enough that the language
+// declined to reserve it.
 var reservedWords = map[string]bool{
 	"module": true, "analog": true, "digital": true, "func": true, "state": true,
 	"if": true, "else": true, "while": true, "return": true, "input": true,
 	"output": true, "import": true, "importc": true, "as": true, "extern": true,
-	"wire": true, "double": true, "int": true, "float": true, "unsigned": true,
-	"time": true, "dt": true,
+	"struct": true, "wire": true, "double": true, "int": true, "float": true,
+	"unsigned": true, "time": true, "dt": true,
 }
 
 // InsertRequest describes a block being dropped onto a sheet.
 type InsertRequest struct {
-	File       string `json:"file"`       // file holding the target module
-	Module     string `json:"module"`     // qualified name of the sheet
-	Kind       string `json:"kind"`       // "primitive" | "module"
-	TypeName   string `json:"typeName"`   // "R" or "Diode"
-	Alias      string `json:"alias"`      // import alias to use, "" for bare
-	ImportPath string `json:"importPath"` // stdlib path, "" if none needed
-	Instance   string `json:"instance"`   // desired instance name, "" to autogenerate
-	Static     string `json:"static"`     // raw text for <...>
-	Logic      string `json:"logic"`      // raw text for (...)
-	Ports      []string `json:"ports"`    // net names for [...]
+	File     string `json:"file"`     // file holding the target module
+	Module   string `json:"module"`   // qualified name of the sheet
+	Kind     string `json:"kind"`     // "primitive" | "module"
+	TypeName string `json:"typeName"` // "R" or "Diode"
+
+	// Alias is an explicit `as` name for the import. Empty means the default
+	// binding — the last segment of the path — which is what a reader expects
+	// and what the palette offers unless the directory cannot spell one.
+	Alias string `json:"alias"`
+
+	// ImportPath is the directory to import, "" when the type is already
+	// visible (a primitive, or a module declared in this project's own
+	// directory, whose files share a namespace without any import).
+	ImportPath string `json:"importPath"`
+
+	// Qualifier names an existing binding to write the type behind, for a
+	// module that is already imported. Only consulted when ImportPath is
+	// empty; otherwise the qualifier comes from the import that is added or
+	// reused, which is the one that actually decides what the name is.
+	Qualifier string `json:"qualifier"`
+
+	Instance string   `json:"instance"` // desired instance name, "" to autogenerate
+	Static   string   `json:"static"`   // raw text for <...>
+	Logic    string   `json:"logic"`    // raw text for (...)
+	Ports    []string `json:"ports"`    // net names for [...]
 }
 
 // InsertResult reports what changed.
 type InsertResult struct {
-	Line          int    `json:"line"`
-	Text          string `json:"text"`
-	ImportAdded   bool   `json:"importAdded"`
-	InstanceName  string `json:"instanceName"`
+	Line         int    `json:"line"`
+	Text         string `json:"text"`
+	ImportAdded  bool   `json:"importAdded"`
+	InstanceName string `json:"instanceName"`
+
+	// Qualifier is the prefix the inserted statement wrote, so the UI can say
+	// what the block is now called on the sheet.
+	Qualifier string `json:"qualifier"`
 }
 
 // InsertBlock writes a new instantiation as the last statement of a module's
@@ -103,12 +130,17 @@ func (p *Project) InsertBlock(req InsertRequest) (*InsertResult, error) {
 	//    Imports are resolved against the ENTRY file (they are non-transitive),
 	//    so that is where a new one has to go — not necessarily the file the
 	//    block is being inserted into.
+	qualifier := ""
+	if req.Kind == "module" && req.ImportPath == "" {
+		qualifier = req.Qualifier
+	}
 	importTargetPath := p.Entry
 	if req.Kind == "module" && req.ImportPath != "" {
-		added, newEntryText, err := p.ensureImport(req.ImportPath, req.Alias)
+		added, q, newEntryText, err := p.ensureImport(req.ImportPath, req.Alias)
 		if err != nil {
 			return nil, err
 		}
+		qualifier = q
 		if added {
 			res.ImportAdded = true
 			if importTargetPath == def.File {
@@ -147,11 +179,14 @@ func (p *Project) InsertBlock(req InsertRequest) (*InsertResult, error) {
 		res.InstanceName = name
 	}
 
-	// 4. Build the statement.
+	// 4. Build the statement. A whole-directory import is always qualified in
+	//    0.8 — nothing it brings in lands in the flat namespace — so the type
+	//    is written `qualifier.Type` whenever an import was involved at all.
 	typeRef := req.TypeName
-	if req.Alias != "" {
-		typeRef = req.Alias + "." + req.TypeName
+	if qualifier != "" {
+		typeRef = qualifier + "." + req.TypeName
 	}
+	res.Qualifier = qualifier
 	ports := strings.Join(req.Ports, ", ")
 
 	var stmt string
@@ -286,23 +321,45 @@ func uniqueName(base string, used map[string]bool) string {
 }
 
 // ensureImport makes importPath visible in the entry file, returning the
-// updated entry text. It is a no-op when an equivalent import already exists.
-func (p *Project) ensureImport(importPath, alias string) (added bool, text string, err error) {
+// qualifier the inserted statement should write and the updated entry text.
+//
+// It is a no-op when an equivalent import already exists — and "equivalent"
+// now means "names the same DIRECTORY", not "is spelled the same way".
+// `import <math>` and `import <stdlib/math>` are two spellings of one
+// directory, and adding the second on top of the first would be two imports
+// binding two qualifiers to the same thing.
+func (p *Project) ensureImport(importPath, alias string) (added bool, qualifier, text string, err error) {
 	entry := p.Files[p.Entry]
 	if entry == nil {
-		return false, "", fmt.Errorf("entry file not loaded")
+		return false, "", "", fmt.Errorf("entry file not loaded")
 	}
 	text = entry.Src.Text
 
 	want := filepath.ToSlash(importPath)
+	wantDir := loader.ResolveImportPath(p.Root, want, true)
+	qualifier = loader.QualifierFor(want, alias)
+
+	if err := ValidateIdent(qualifier); err != nil {
+		return false, "", "", fmt.Errorf("<%s> would be imported as %q, which is not a usable name — give it an explicit alias", want, qualifier)
+	}
+
 	for _, imp := range entry.Imports {
-		if filepath.ToSlash(imp.Raw) != want {
+		if imp.Selective || !imp.Resolved || !sameDir(imp.Dir, wantDir) {
 			continue
 		}
-		// Already imported. Only reuse it when the alias matches, otherwise
-		// the type would not actually be reachable under the name we emit.
-		if imp.Alias == alias {
-			return false, text, nil
+		// Already imported. Whatever qualifier that statement bound is the
+		// one the type is actually reachable under, so it wins over the
+		// requested alias rather than a second import being added.
+		return false, imp.Qualifier, text, nil
+	}
+
+	// Two imports binding the same qualifier is an error in the compiler, so
+	// a collision has to be resolved here rather than written into the file.
+	for _, imp := range entry.Imports {
+		if !imp.Selective && imp.Qualifier == qualifier {
+			return false, "", "", fmt.Errorf(
+				"another import already binds the name %q — choose a different alias for <%s>",
+				qualifier, want)
 		}
 	}
 
@@ -313,7 +370,7 @@ func (p *Project) ensureImport(importPath, alias string) (added bool, text strin
 
 	insertAt := importInsertPoint(entry)
 	out := text[:insertAt] + stmt + "\n" + text[insertAt:]
-	return true, out, nil
+	return true, qualifier, out, nil
 }
 
 // importInsertPoint returns the offset where a new import should go: right

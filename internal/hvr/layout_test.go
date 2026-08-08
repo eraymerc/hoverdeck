@@ -13,7 +13,7 @@ const layoutSrc = `module main<>() [] {
 
 func TestBlocksAndChipsGetAutoPlacedWithoutOverlap(t *testing.T) {
 	entry := writeTemp(t, map[string]string{"main.hvr": layoutSrc})
-	p, _ := LoadProject(entry, "")
+	p, _ := LoadProject(entry, nil)
 	sh, err := p.BuildSheet("main")
 	if err != nil {
 		t.Fatal(err)
@@ -45,7 +45,7 @@ func TestBlocksAndChipsGetAutoPlacedWithoutOverlap(t *testing.T) {
 
 func TestSignalChipPositionPersists(t *testing.T) {
 	entry := writeTemp(t, map[string]string{"main.hvr": layoutSrc})
-	p, _ := LoadProject(entry, "")
+	p, _ := LoadProject(entry, nil)
 	sh, _ := p.BuildSheet("main")
 
 	l := LoadLayout(entry)
@@ -90,7 +90,7 @@ func TestSignalChipPositionPersists(t *testing.T) {
 
 func TestBlockTransformPersistsAndNormalises(t *testing.T) {
 	entry := writeTemp(t, map[string]string{"main.hvr": layoutSrc})
-	p, _ := LoadProject(entry, "")
+	p, _ := LoadProject(entry, nil)
 	sh, _ := p.BuildSheet("main")
 
 	l := LoadLayout(entry)
@@ -130,7 +130,7 @@ func TestBlockTransformPersistsAndNormalises(t *testing.T) {
 
 func TestNetTrunkStoresBothAxes(t *testing.T) {
 	entry := writeTemp(t, map[string]string{"main.hvr": layoutSrc})
-	p, _ := LoadProject(entry, "")
+	p, _ := LoadProject(entry, nil)
 	sh, _ := p.BuildSheet("main")
 
 	l := LoadLayout(entry)
@@ -174,7 +174,7 @@ func TestNetTrunkStoresBothAxes(t *testing.T) {
 
 func TestLegDYMovesOneLegIndependently(t *testing.T) {
 	entry := writeTemp(t, map[string]string{"main.hvr": layoutSrc})
-	p, _ := LoadProject(entry, "")
+	p, _ := LoadProject(entry, nil)
 	sh, _ := p.BuildSheet("main")
 
 	// Net "n" has two legs: the voltage source's n+ pin (V1:0) and R's n+
@@ -224,7 +224,7 @@ func TestLegDYMovesOneLegIndependently(t *testing.T) {
 
 func TestLegDYNeverSerialisesAsNull(t *testing.T) {
 	entry := writeTemp(t, map[string]string{"main.hvr": layoutSrc})
-	p, _ := LoadProject(entry, "")
+	p, _ := LoadProject(entry, nil)
 	sh, err := p.BuildSheet("main")
 	if err != nil {
 		t.Fatal(err)
@@ -238,7 +238,7 @@ func TestLegDYNeverSerialisesAsNull(t *testing.T) {
 
 func TestClearNetTrunkAlsoClearsLegOffsets(t *testing.T) {
 	entry := writeTemp(t, map[string]string{"main.hvr": layoutSrc})
-	p, _ := LoadProject(entry, "")
+	p, _ := LoadProject(entry, nil)
 	sh, _ := p.BuildSheet("main")
 
 	l := LoadLayout(entry)
@@ -285,7 +285,7 @@ analog module Ammeter<>() [wire p, wire n] {
 
 func TestNamedPrimitiveUsesSourceNameAsBlockID(t *testing.T) {
 	entry := writeTemp(t, map[string]string{"main.hvr": ccSourcesSrc})
-	p, _ := LoadProject(entry, "")
+	p, _ := LoadProject(entry, nil)
 	sh, err := p.BuildSheet("Ammeter")
 	if err != nil {
 		t.Fatal(err)
@@ -303,7 +303,7 @@ func TestNamedPrimitiveUsesSourceNameAsBlockID(t *testing.T) {
 
 func TestCCCSAndCCVSSenseIsARefNotANet(t *testing.T) {
 	entry := writeTemp(t, map[string]string{"main.hvr": ccSourcesSrc})
-	p, _ := LoadProject(entry, "")
+	p, _ := LoadProject(entry, nil)
 	sh, err := p.BuildSheet("main")
 	if err != nil {
 		t.Fatal(err)
@@ -350,7 +350,7 @@ func TestCorruptSidecarIsIgnored(t *testing.T) {
 	if l == nil || l.Sheets == nil {
 		t.Fatal("a corrupt sidecar must degrade to an empty layout, not a nil one")
 	}
-	p, _ := LoadProject(entry, "")
+	p, _ := LoadProject(entry, nil)
 	sh, err := p.BuildSheet("main")
 	if err != nil {
 		t.Fatal(err)

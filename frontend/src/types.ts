@@ -189,9 +189,18 @@ export interface FileInfo {
   path: string;
   name: string;
   isEntry: boolean;
-  isStdlib: boolean;
+  /** The installed package this file came from, "" for the user's own source. */
+  package: string;
   lines: number;
   errors: number;
+}
+
+/** The import table a project resolves `import <...>` against. */
+export interface Packages {
+  roots: Record<string, string> | null;
+  bundled: string;
+  stdlibInstalled: boolean;
+  note: string;
 }
 
 export interface SheetRef {
@@ -206,7 +215,7 @@ export interface SheetRef {
 export interface ProjectInfo {
   entry: string;
   root: string;
-  stdlibRoot: string;
+  packages: Packages | null;
   layoutPath: string;
   files: FileInfo[] | null;
   modules: ModuleDef[] | null;
@@ -241,8 +250,12 @@ export interface CatalogEntry {
   domain: string;
   desc: string;
   group: string;
+  /** The directory to import, e.g. "semiconductors" or "stdlib/math". */
   importPath: string;
+  /** The name that import binds, and the prefix an instantiation writes. */
+  qualifier: string;
   suggestAlias: string;
+  package: string;
   physPorts: string[] | null;
   staticParams: StaticParam[] | null;
   logicPorts: LogicPort[] | null;
@@ -263,6 +276,8 @@ export interface InsertRequest {
   typeName: string;
   alias: string;
   importPath: string;
+  /** An existing binding to write the type behind, when no import is added. */
+  qualifier: string;
   instance: string;
   static: string;
   logic: string;
@@ -344,11 +359,15 @@ export interface Workspace {
 export interface SettingsView {
   hoverBin: string;
   workDir: string;
-  stdlibRoot: string;
   configPath: string;
   binOK: boolean;
   runtimeOK: boolean;
+  stdlibOK: boolean;
+  needsSetup: boolean;
+  effectiveBin: string;
   effectiveWork: string;
+  detected: string;
+  packages: number;
   note: string;
 }
 
@@ -365,4 +384,6 @@ export interface InsertResult {
   text: string;
   importAdded: boolean;
   instanceName: string;
+  /** The prefix the inserted statement wrote, "" when the type was bare. */
+  qualifier: string;
 }

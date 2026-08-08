@@ -74,10 +74,7 @@ func (a *App) OpenPlot(path string) (*PlotInfo, error) {
 
 // PickPlot opens a file dialog for a results CSV.
 func (a *App) PickPlot() (*PlotInfo, error) {
-	dir := ""
-	if a.settings != nil {
-		dir = a.settings.EffectiveWorkDir()
-	}
+	dir := a.runDir()
 	path, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
 		Title:            "Open simulation results",
 		DefaultDirectory: dir,
@@ -103,10 +100,7 @@ func (a *App) LatestResults() string {
 	if a.settings == nil {
 		return ""
 	}
-	dir := a.settings.EffectiveWorkDir()
-	if dir == "" && a.entry != "" {
-		dir = filepath.Dir(a.entry)
-	}
+	dir := a.runDir()
 	if dir == "" {
 		return ""
 	}

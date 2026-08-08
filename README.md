@@ -7,6 +7,10 @@ hoverdeck shows you **what is connected to where**. It reads your `.hvr` files w
 real compiler front end, draws each module's blocks, wires and state variables, and lets
 you edit the code from the same window.
 
+Tracks **hover 0.8**: imports name directories, packages resolve through `hover.lock`
+and `~/.hover`, and the standard library is installed by `hover --setup` rather than
+found on disk.
+
 It is not a schematic capture tool that generates code behind your back. **The `.hvr`
 files stay the source of truth**: hoverdeck parses them to build the picture, and every
 change it makes is a narrow, surgical edit to the exact bytes involved. Comments,
@@ -48,7 +52,8 @@ with SPICE reference designators (`R1`, `C2`, `V1`, …).
 - **Edit a value in place** → change a parameter, a port's net, or a driven source's
   control signal in the inspector; it rewrites just that span.
 - **Drag from the palette** → inserts a correct instantiation into the current module,
-  adding the `import <...>` line if the type isn't visible yet.
+  adding the `import <...>` line if the type isn't visible yet, and qualifying the type
+  with whatever name that import binds.
 - **Rename a net** → updates every use in the module plus its `wire` declaration.
 - **Arrange the diagram** → drag blocks, signal chips and wires; positions are saved.
 - **Rotate and mirror blocks** → from the inspector, or with `R` (rotate 90°),
@@ -79,20 +84,22 @@ It auto-detects one by looking for a directory containing both a `hover` executa
 a `runtime/` directory, searching up from hoverdeck and across sibling checkouts. If
 that finds the wrong one, set it explicitly in **Settings** (⚙).
 
-Settings live in `$XDG_CONFIG_HOME/hoverdeck/config.json` and hold three things:
+Settings live in `$XDG_CONFIG_HOME/hoverdeck/config.json` and hold two things:
 
 | | |
 |---|---|
 | **hover binary** | the compiler to invoke |
-| **working directory** | where it runs — defaults to the binary's own directory |
-| **stdlib root** | resolves `import <...>`; auto-detected when blank |
+| **working directory** | where it runs — leave blank to use the project folder |
 
-The working directory matters more than it looks. The hover CLI links against
-`./runtime/libhover_runtime.a`, looks for `./toolchain/zig`, and writes `sim.cpp` and
-`simulation_output.csv` relative to wherever it is run — so it normally has to run from
-the root of your hover checkout, not from your project folder. hoverdeck passes your
-`.hvr` as an absolute path for exactly that reason, and Settings warns when the working
-directory has no `runtime/` in it.
+Leave the working directory blank. Until hover 0.8 it had to be the root of your hover
+checkout, because the CLI resolved `./runtime` and `./toolchain/zig` from wherever it was
+run; 0.8 anchors both to the compiler executable's own directory, so a run happens in your
+project and `sim.cpp`, `sim` and `simulation_output.csv` land beside the circuit that
+produced them.
+
+A fresh hover install needs `hover --setup` once — it builds the C++ runtime and downloads
+the standard library. Settings says so when either is missing, and has a button to run it;
+output streams into the console like any other run.
 
 Output streams into the console panel as it arrives, coloured by the CLI's own
 `[Stage]` prefixes, and **Stop** kills the whole process tree — the compiler, Zig, and
@@ -168,16 +175,16 @@ on Linux.
 hoverdeck compiles the Hover compiler in directly, via a `replace` directive:
 
 ```
-replace hover => ../hover-lang
+replace hover => ../hover-main
 ```
 
-so a checkout of hover-lang must sit beside this directory. Changes to the compiler's
+so a checkout of the hover compiler must sit beside this directory. Changes to the compiler's
 AST are picked up on the next build with no re-pinning.
 
 ```sh
-git clone https://github.com/eraymerc/hover-lang.git   # sibling of hoverdeck/
+git clone https://github.com/eraymerc/hover-lang.git hover-main   # sibling of hoverdeck/
 cd hoverdeck
-make build          # -> build/bin/hoverdeck, with standard_library staged beside it
+make build          # -> build/bin/hoverdeck
 make dev            # live-reloading development window
 make check          # go vet + tsc --noEmit + tests
 make build-windows  # cross-compile for Windows
@@ -191,17 +198,36 @@ Ubuntu 24.04+), Wails needs a build tag. The Makefile detects this and adds
 wails build -tags webkit2_41
 ```
 
-## Finding the standard library
+## Packages
 
-`import <...>` resolves against a `standard_library` directory. The Hover compiler looks
-next to the `hover` binary; hoverdeck is a different binary, so it searches, in order:
+Since hover 0.8 an import names a **directory**, and the first segment of an angle import
+is a **package name**:
 
-1. `$HOVER_HOME`
-2. `standard_library` next to the hoverdeck binary (what `make build` stages)
-3. `../hover-lang/standard_library`
-4. the same two paths relative to the working directory
+```hover
+import <math>;                       // math.sin(x)
+import <semiconductors> as devices;  // devices.Diode<...>
+from <math> import sin;              // sin(x)
+import "./parts";                    // parts.Widget<...>
+```
 
-The status bar shows which one was found; click it to choose a different one.
+A whole-directory import is always qualified — nothing it brings in lands in the flat
+namespace — and the binding defaults to the last path segment. Only `from … import …`
+puts names in scope bare. hoverdeck's palette writes both forms correctly, and the
+insert dialog shows which qualifier the statement will use.
+
+The standard library is an ordinary installed package, so there is nothing to point
+hoverdeck at. It reads the same lockfiles the compiler does:
+
+- inside a project — that project's `hover.lock`, plus the machine's standard library
+- outside one — everything installed machine-wide in `~/.hover`
+
+The status bar shows how many package roots resolved; click it for the package window,
+which lists them and runs `hover hpm install / list / update / verify` in the project
+folder. Anything installed from a terminal shows up on the next re-read.
+
+One thing to know when opening a 0.7 file: `import <math/math.hvr>` is no longer valid,
+and hoverdeck reports it as `write <math> instead of <math/math.hvr>` rather than as an
+unresolved path, so the fix is mechanical.
 
 ## Layout
 
@@ -214,11 +240,12 @@ run_unix.go/_windows.go process-tree termination per platform
 main.go                 Wails window setup
 platform_darwin.go      compile-time platform guard
 internal/hvr/
+  packages.go           the import table: lockfiles, ~/.hover, bundled fallback
   project.go            load + parse a file and its imports; module namespace
   source.go             byte-exact span recovery from the source text
   graph.go              module -> blocks, nets, signals
   edit.go               surgical source edits (insert, rename, delete, replace)
-  catalog.go            primitives, icons, standard-library scan
+  catalog.go            primitives, icons, installed-package scan
   layout.go             sidecar persistence
 cmd/probe/              CLI that dumps a parsed sheet; handy for debugging
 frontend/src/

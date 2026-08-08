@@ -3,7 +3,10 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"hoverdeck/internal/hvr"
 )
 
 // makeInstall creates a directory that looks like a hover installation.
@@ -60,8 +63,9 @@ func TestSettingsViewFallsBackToDetected(t *testing.T) {
 	root := t.TempDir()
 	bin := makeInstall(t, filepath.Join(root, "hover-lang"), true)
 
+	pkgs := &hvr.Packages{Roots: map[string]string{"math": root}, StdlibInstalled: true}
 	s := &Settings{}
-	v := s.view(bin)
+	v := s.view(bin, filepath.Dir(bin), pkgs)
 	if !v.BinOK {
 		t.Error("auto-detected binary should count as usable")
 	}
@@ -78,7 +82,7 @@ func TestSettingsViewFallsBackToDetected(t *testing.T) {
 	// An explicit setting must win over detection.
 	other := makeInstall(t, filepath.Join(root, "other"), true)
 	s.HoverBin = other
-	v2 := s.view(bin)
+	v2 := s.view(bin, filepath.Dir(other), pkgs)
 	if v2.EffectiveBin != other {
 		t.Errorf("explicit setting should win: got %q, want %q", v2.EffectiveBin, other)
 	}
@@ -88,7 +92,8 @@ func TestSettingsViewReportsMissingRuntime(t *testing.T) {
 	root := t.TempDir()
 	bin := makeInstall(t, filepath.Join(root, "loose"), false)
 
-	v := (&Settings{HoverBin: bin}).view("")
+	v := (&Settings{HoverBin: bin}).view("", filepath.Dir(bin),
+		&hvr.Packages{Roots: map[string]string{"math": root}, StdlibInstalled: true})
 	if !v.BinOK {
 		t.Error("the binary itself exists, so BinOK should hold")
 	}
@@ -100,17 +105,40 @@ func TestSettingsViewReportsMissingRuntime(t *testing.T) {
 	}
 }
 
+// Releases ship no standard library, so a complete install that has never run
+// `hover --setup` is the state a first-time user is actually in. The settings
+// view has to name the one command that fixes it.
+func TestSettingsViewReportsMissingStdlib(t *testing.T) {
+	root := t.TempDir()
+	bin := makeInstall(t, filepath.Join(root, "fresh"), true)
+
+	v := (&Settings{HoverBin: bin}).view("", filepath.Dir(bin),
+		&hvr.Packages{Roots: map[string]string{}})
+	if !v.RuntimeOK {
+		t.Error("runtime/ is present beside the binary")
+	}
+	if v.StdlibOK {
+		t.Error("no package roots, so the standard library cannot be installed")
+	}
+	if !v.NeedsSetup {
+		t.Error("a missing standard library is exactly what --setup fixes")
+	}
+	if !strings.Contains(v.Note, "--setup") {
+		t.Errorf("the note should name `hover --setup`, got %q", v.Note)
+	}
+}
+
 func TestSettingsRoundTrip(t *testing.T) {
 	// Redirect the config to a temp dir so the developer's real settings are
 	// never touched by the test suite.
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
-	s := &Settings{HoverBin: "/opt/hover/hover", WorkDir: "/opt/hover", StdlibRoot: "/opt/hover/standard_library"}
+	s := &Settings{HoverBin: "/opt/hover/hover", WorkDir: "/opt/hover"}
 	if err := s.Save(); err != nil {
 		t.Fatal(err)
 	}
 	got := LoadSettings()
-	if got.HoverBin != s.HoverBin || got.WorkDir != s.WorkDir || got.StdlibRoot != s.StdlibRoot {
+	if got.HoverBin != s.HoverBin || got.WorkDir != s.WorkDir {
 		t.Errorf("round trip mismatch: %+v vs %+v", got, s)
 	}
 }

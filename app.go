@@ -23,8 +23,13 @@ import (
 type App struct {
 	ctx context.Context
 
-	entry      string
-	stdlibRoot string
+	entry string
+
+	// packages is the import table the open project resolves against. It is
+	// rebuilt whenever the entry file changes, because which packages a file
+	// can see depends on whether it sits inside a project with its own
+	// hover.lock — see hvr.ResolvePackages.
+	packages *hvr.Packages
 
 	workspace   string
 	project     *hvr.Project
@@ -50,17 +55,7 @@ func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	a.settings = LoadSettings()
 	a.detectedBin = DetectHoverInstall(a.settings.EffectiveWorkDir(), os.Getenv("HOVER_HOME"))
-
-	// Precedence: an explicit setting, then $HOVER_HOME, then the compiler's
-	// own layout conventions relative to this binary.
-	hint := a.settings.StdlibRoot
-	if hint == "" {
-		hint = os.Getenv("HOVER_HOME")
-	}
-	if hint == "" {
-		hint = a.settings.EffectiveWorkDir()
-	}
-	a.stdlibRoot = hvr.FindStdlib(hint)
+	a.refreshPackages()
 
 	// Opening a file passed on the command line makes `hoverdeck main.hvr`
 	// behave like any other editor launch.
@@ -83,19 +78,30 @@ func (a *App) startup(ctx context.Context) {
 	}
 }
 
+// refreshPackages rebuilds the import table for whatever is currently open.
+//
+// It is not cached across files on purpose: since 0.8 the answer to "what can
+// this file import?" depends on where the file is. Inside a project it is that
+// project's hover.lock plus the machine's standard library; outside one it is
+// everything installed machine-wide. Opening a file in a different project has
+// to change the answer, or the palette offers modules the compiler will refuse.
+func (a *App) refreshPackages() {
+	a.packages = hvr.ResolvePackages(a.entry, a.effectiveBin())
+}
+
 // ── Project state ────────────────────────────────────────────────────────────
 
 // ProjectInfo is the top-level state the UI renders around.
 type ProjectInfo struct {
-	Entry      string             `json:"entry"`
-	Root       string             `json:"root"`
-	StdlibRoot string             `json:"stdlibRoot"`
-	LayoutPath string             `json:"layoutPath"`
-	Files      []FileInfo         `json:"files"`
-	Modules    []*hvr.ModuleDef   `json:"modules"`
-	Sheets     []SheetRef         `json:"sheets"`
-	Errors     []string           `json:"errors"`
-	Open       bool               `json:"open"`
+	Entry      string           `json:"entry"`
+	Root       string           `json:"root"`
+	Packages   *hvr.Packages    `json:"packages"`
+	LayoutPath string           `json:"layoutPath"`
+	Files      []FileInfo       `json:"files"`
+	Modules    []*hvr.ModuleDef `json:"modules"`
+	Sheets     []SheetRef       `json:"sheets"`
+	Errors     []string         `json:"errors"`
+	Open       bool             `json:"open"`
 }
 
 // FileInfo is one source file in the project tree.
@@ -103,9 +109,15 @@ type FileInfo struct {
 	Path    string `json:"path"`
 	Name    string `json:"name"`
 	IsEntry bool   `json:"isEntry"`
-	IsStdlib bool  `json:"isStdlib"`
-	Lines   int    `json:"lines"`
-	Errors  int    `json:"errors"`
+
+	// Package names the installed package a file came from, "" for the
+	// user's own source. Library files open read-only: an installed package
+	// lives in a content-addressed cache shared by every project on the
+	// machine that resolved to the same hash.
+	Package string `json:"package"`
+
+	Lines  int `json:"lines"`
+	Errors int `json:"errors"`
 }
 
 // SheetRef names a module that can be shown on the canvas.
@@ -127,14 +139,13 @@ func (a *App) OpenProject(path string) (*ProjectInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	if a.stdlibRoot == "" {
-		a.stdlibRoot = hvr.FindStdlib(filepath.Dir(abs))
-	}
-	p, err := hvr.LoadProject(abs, a.stdlibRoot)
+	pkgs := hvr.ResolvePackages(abs, a.effectiveBin())
+	p, err := hvr.LoadProject(abs, pkgs)
 	if err != nil {
 		return nil, err
 	}
 	a.entry = abs
+	a.packages = pkgs
 	a.project = p
 	a.layout = hvr.LoadLayout(abs)
 
@@ -150,7 +161,11 @@ func (a *App) Reload() (*ProjectInfo, error) {
 	if a.entry == "" {
 		return &ProjectInfo{Open: false}, nil
 	}
-	p, err := hvr.LoadProject(a.entry, a.stdlibRoot)
+	// The lockfile is re-read too: `hover hpm install` in a terminal alongside
+	// hoverdeck is the normal way to add a package, and Reload is how that
+	// becomes visible here.
+	a.refreshPackages()
+	p, err := hvr.LoadProject(a.entry, a.packages)
 	if err != nil {
 		return nil, err
 	}
@@ -163,13 +178,13 @@ func (a *App) Info() *ProjectInfo { return a.info() }
 
 func (a *App) info() *ProjectInfo {
 	if a.project == nil {
-		return &ProjectInfo{Open: false, StdlibRoot: a.stdlibRoot}
+		return &ProjectInfo{Open: false, Packages: a.packages}
 	}
 	p := a.project
 	pi := &ProjectInfo{
 		Entry:      p.Entry,
 		Root:       p.Root,
-		StdlibRoot: p.StdlibRoot,
+		Packages:   p.Packages,
 		LayoutPath: hvr.LayoutPath(p.Entry),
 		Errors:     p.AllErrors(),
 		Modules:    p.Modules(),
@@ -181,10 +196,10 @@ func (a *App) info() *ProjectInfo {
 		pi.Files = append(pi.Files, FileInfo{
 			Path:     path,
 			Name:     filepath.Base(path),
-			IsEntry:  path == p.Entry,
-			IsStdlib: p.StdlibRoot != "" && strings.HasPrefix(path, p.StdlibRoot),
-			Lines:    f.Src.LineCount(),
-			Errors:   len(f.Errors),
+			IsEntry: path == p.Entry,
+			Package: p.Packages.PackageOf(path),
+			Lines:   f.Src.LineCount(),
+			Errors:  len(f.Errors),
 		})
 	}
 
@@ -303,9 +318,11 @@ func (a *App) ReadFile(path string) (*SourceFile, error) {
 		if f, ok := a.project.Files[path]; ok {
 			sf.Errors = f.Errors
 		}
-		// Standard-library files open read-only by default: editing the shared
-		// library from a circuit window is almost always a mistake.
-		sf.ReadOnly = a.project.StdlibRoot != "" && strings.HasPrefix(path, a.project.StdlibRoot)
+		// Package sources open read-only: they live in a content-addressed
+		// cache shared by every project on this machine that resolved to the
+		// same hash, so editing one from a circuit window would silently
+		// change other people's builds as well as this one.
+		sf.ReadOnly = a.project.Packages.Owns(path)
 	}
 	return sf, nil
 }
@@ -328,21 +345,35 @@ func (a *App) CheckSyntax(path, text string) []string {
 
 // Catalog is everything droppable onto a sheet.
 type Catalog struct {
-	Primitives []hvr.PrimitiveDef  `json:"primitives"`
-	Stdlib     []hvr.CatalogEntry  `json:"stdlib"`
-	Local      []hvr.CatalogEntry  `json:"local"`
+	Primitives []hvr.PrimitiveDef `json:"primitives"`
+
+	// Stdlib holds every installed package's modules, not only the standard
+	// library's — since 0.8 they arrive through one package table and are
+	// dropped onto a sheet the same way. The name is kept because it is what
+	// the palette section is called.
+	Stdlib []hvr.CatalogEntry `json:"stdlib"`
+	Local  []hvr.CatalogEntry `json:"local"`
 }
 
-// GetCatalog returns the built-in primitives, the standard library, and the
+// GetCatalog returns the built-in primitives, every installed package, and the
 // modules declared in the open project itself.
 func (a *App) GetCatalog() *Catalog {
 	c := &Catalog{Primitives: hvr.Primitives()}
-	c.Stdlib = hvr.ScanStdlib(a.stdlibRoot)
+	c.Stdlib = hvr.ScanPackages(a.packages)
 
 	if a.project != nil {
 		for _, d := range a.project.Modules() {
-			if a.project.StdlibRoot != "" && strings.HasPrefix(d.File, a.project.StdlibRoot) {
+			if a.project.Packages.Owns(d.File) {
 				continue
+			}
+			// A local module reached through a relative import is only visible
+			// behind that import's qualifier, so the palette carries it and
+			// the inserted statement writes `parts.Widget`. One declared in
+			// the entry file's own directory has no qualifier at all — since
+			// 0.8, siblings share a namespace with no import involved.
+			qualifier := ""
+			if i := strings.LastIndex(d.QualifiedAs, "."); i >= 0 {
+				qualifier = d.QualifiedAs[:i]
 			}
 			c.Local = append(c.Local, hvr.CatalogEntry{
 				Kind:         "module",
@@ -351,6 +382,7 @@ func (a *App) GetCatalog() *Catalog {
 				Domain:       d.Domain,
 				Desc:         d.Doc,
 				Group:        filepath.Base(d.File),
+				Qualifier:    qualifier,
 				PhysPorts:    d.PhysPorts,
 				StaticParams: d.StaticParams,
 				LogicPorts:   d.LogicPorts,
@@ -425,34 +457,48 @@ func (a *App) DeleteBlock(path string, stmt hvr.Span) error {
 
 // ── Compiler ─────────────────────────────────────────────────────────────────
 
-// GetSettings returns the stored settings plus derived health checks.
-func (a *App) GetSettings() *SettingsView {
-	return a.settings.view(a.detectedBin)
+// runDir is the directory a compile happens in.
+//
+// The project's own directory, unless overridden. Until 0.8 this had to be the
+// hover install root — the CLI resolved ./runtime and ./toolchain/zig from the
+// working directory, so running anywhere else failed at the link step. 0.8
+// anchors those to the compiler executable instead, which frees the working
+// directory to be the one the user means: sim.cpp, sim and
+// simulation_output.csv now land beside the circuit that produced them.
+func (a *App) runDir() string {
+	if a.settings != nil && a.settings.WorkDir != "" {
+		return a.settings.WorkDir
+	}
+	if a.entry != "" {
+		return filepath.Dir(a.entry)
+	}
+	if a.settings != nil {
+		return a.settings.EffectiveWorkDir()
+	}
+	return ""
 }
 
-// SaveSettings stores the compiler location and reloads the project so a new
-// standard library takes effect immediately.
-func (a *App) SaveSettings(hoverBin, workDir, stdlibRoot string) (*SettingsView, error) {
+// GetSettings returns the stored settings plus derived health checks.
+func (a *App) GetSettings() *SettingsView {
+	return a.settings.view(a.detectedBin, a.runDir(), a.packages)
+}
+
+// SaveSettings stores the compiler location and reloads the project, so a
+// different installation's standard library takes effect immediately.
+func (a *App) SaveSettings(hoverBin, workDir string) (*SettingsView, error) {
 	a.settings.HoverBin = strings.TrimSpace(hoverBin)
 	a.settings.WorkDir = strings.TrimSpace(workDir)
-	a.settings.StdlibRoot = strings.TrimSpace(stdlibRoot)
 	if err := a.settings.Save(); err != nil {
 		return nil, err
 	}
 
-	hint := a.settings.StdlibRoot
-	if hint == "" {
-		hint = a.settings.EffectiveWorkDir()
-	}
-	if found := hvr.FindStdlib(hint); found != "" {
-		a.stdlibRoot = found
-	}
+	a.refreshPackages()
 	if a.entry != "" {
 		if _, err := a.Reload(); err != nil {
-			return a.settings.view(a.detectedBin), err
+			return a.GetSettings(), err
 		}
 	}
-	return a.settings.view(a.detectedBin), nil
+	return a.GetSettings(), nil
 }
 
 // PickHoverBinary opens a file dialog for the compiler executable.
@@ -464,7 +510,7 @@ func (a *App) PickHoverBinary() (*SettingsView, error) {
 		return nil, err
 	}
 	if path == "" {
-		return a.settings.view(a.detectedBin), nil
+		return a.GetSettings(), nil
 	}
 	if !looksLikeHoverBinary(path) {
 		// Not fatal — the binary may legitimately be renamed — but worth saying.
@@ -473,21 +519,22 @@ func (a *App) PickHoverBinary() (*SettingsView, error) {
 				"note: selected file is not named 'hover'; make sure it is the compiler")
 		}()
 	}
-	return a.SaveSettings(path, a.settings.WorkDir, a.settings.StdlibRoot)
+	return a.SaveSettings(path, a.settings.WorkDir)
 }
 
-// PickWorkDir chooses the directory the compiler runs in.
+// PickWorkDir overrides the directory the compiler runs in. Leaving it unset
+// is normal — the project's own directory is the default.
 func (a *App) PickWorkDir() (*SettingsView, error) {
 	dir, err := runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
-		Title: "Working directory for the compiler (the hover checkout root)",
+		Title: "Working directory for the compiler (leave unset to use the project folder)",
 	})
 	if err != nil {
 		return nil, err
 	}
 	if dir == "" {
-		return a.settings.view(a.detectedBin), nil
+		return a.GetSettings(), nil
 	}
-	return a.SaveSettings(a.settings.HoverBin, dir, a.settings.StdlibRoot)
+	return a.SaveSettings(a.settings.HoverBin, dir)
 }
 
 // Run compiles and simulates the open project with the configured compiler.
@@ -544,29 +591,38 @@ func (a *App) ClearNetTrunk(module, net string) error {
 	return a.layout.Save(a.entry)
 }
 
-// SetStdlibRoot points hoverdeck at a different standard library.
-func (a *App) SetStdlibRoot(path string) (*ProjectInfo, error) {
-	resolved := hvr.FindStdlib(path)
-	if resolved == "" {
-		return nil, fmt.Errorf("no standard_library found under %s", path)
+// ── Packages ─────────────────────────────────────────────────────────────────
+//
+// There is no "point hoverdeck at a standard library" any more, and that is
+// the point: 0.8 made the standard library an ordinary installed package, so
+// where it lives is `hover --setup`'s answer and hoverdeck reads the same
+// lockfiles the compiler does. What replaces the old picker is the ability to
+// run the two commands that change that answer.
+
+// GetPackages returns the import table the open project resolves against.
+func (a *App) GetPackages() *hvr.Packages {
+	if a.packages == nil {
+		a.refreshPackages()
 	}
-	a.stdlibRoot = resolved
+	return a.packages
+}
+
+// RunSetup runs `hover --setup`, which builds the C++ runtime and downloads
+// the standard library into ~/.hover. Output streams to the console like a
+// run; the project reloads when it finishes.
+func (a *App) RunSetup() error { return a.runner.Setup(a) }
+
+// RunHPM runs `hover hpm <args...>` in the project directory — install,
+// update, remove, list, verify, index, clean.
+func (a *App) RunHPM(args []string) error { return a.runner.HPM(a, args) }
+
+// RefreshPackages re-reads the lockfiles and reloads the project. Called after
+// a setup or hpm command finishes, and by the UI's refresh action, since a
+// package may equally have been installed from a terminal alongside hoverdeck.
+func (a *App) RefreshPackages() (*ProjectInfo, error) {
+	a.refreshPackages()
 	if a.entry == "" {
 		return a.info(), nil
 	}
 	return a.Reload()
-}
-
-// PickStdlibRoot asks for a hover checkout or standard_library directory.
-func (a *App) PickStdlibRoot() (*ProjectInfo, error) {
-	dir, err := runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
-		Title: "Locate the Hover standard_library directory",
-	})
-	if err != nil {
-		return nil, err
-	}
-	if dir == "" {
-		return a.info(), nil
-	}
-	return a.SetStdlibRoot(dir)
 }

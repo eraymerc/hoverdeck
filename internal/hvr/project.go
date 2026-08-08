@@ -9,8 +9,10 @@ import (
 
 	"hover/compiler/ast"
 	"hover/compiler/lexer"
+	"hover/compiler/loader"
 	"hover/compiler/parser"
 	"hover/compiler/token"
+	"hover/hpm"
 )
 
 // Domain names as exposed to the UI.
@@ -40,14 +42,42 @@ type File struct {
 	Imports []ResolvedImport
 }
 
-// ResolvedImport is one `import` statement with its target resolved to a path.
+// SelectedName is one entry in a `from <dir> import a, b as c;` list.
+type SelectedName struct {
+	Name  string `json:"name"`
+	Alias string `json:"alias"`
+}
+
+// Local is the name this symbol is reachable as in the importing file.
+func (s SelectedName) Local() string {
+	if s.Alias != "" {
+		return s.Alias
+	}
+	return s.Name
+}
+
+// ResolvedImport is one `import` statement with its target resolved.
+//
+// Since 0.8 the target is a DIRECTORY, not a file: every .hvr directly inside
+// it is imported together and shares one namespace. Dir is that directory and
+// Files are its contents.
 type ResolvedImport struct {
-	Alias    string
-	Raw      string
-	IsSystem bool
-	Path     string
-	Line     int
-	Resolved bool
+	// Qualifier is the name this import binds. A whole-directory import is
+	// always qualified — its names are reachable only as Qualifier.Name — and
+	// the default is the last path segment, so `import <semiconductors/bjt>`
+	// binds `bjt`. Empty for a selective import, which binds nothing.
+	Qualifier string
+	Alias     string // the explicit `as` name, "" when the default was used
+	Raw       string
+	IsSystem  bool
+	Dir       string
+	Files     []string
+	Package   string // the package it resolved through, "" for a relative import
+	Line      int
+	Resolved  bool
+
+	Selective bool
+	Selected  []SelectedName
 }
 
 // StaticParam is one `<...>` declaration parameter of a module.
@@ -80,96 +110,244 @@ type ModuleDef struct {
 }
 
 // Project is an entry .hvr plus every file reachable from its imports.
+//
+// "Reachable" is wider than it was: an import names a directory, so it pulls
+// in every .hvr inside it rather than one file. It is NOT wider at the entry,
+// though — the entry file's own siblings are not loaded and are not visible to
+// it unless something imports them. That asymmetry is the compiler's, verified
+// against it: `Widget` declared in a sibling of main.hvr elaborates as
+// "undeclared module 'Widget' — modules visible: main". Reproducing it exactly
+// is the whole job here; being more generous would show a block on the canvas
+// that the compiler then refuses to build.
 type Project struct {
-	Entry      string
-	Root       string
-	StdlibRoot string
+	Entry string
+	Root  string
+
+	// Packages is the import table this project resolved against.
+	Packages *Packages
 
 	Files map[string]*File
 	Order []string
 
-	// modules is the flat namespace the elaborator would build: the entry
-	// file's own declarations plus every bare import's, keyed by name;
-	// aliased imports are additionally keyed as "Alias.Name".
+	// dirModules is the per-directory namespace the elaborator builds: every
+	// module declared by any LOADED file in a directory, merged, keyed by
+	// name. Only loaded files count, exactly as in the compiler — which is why
+	// the entry's directory usually contains nothing but the entry itself.
+	dirModules map[string]map[string]*ModuleDef
+
+	// modules is what the ENTRY FILE can see, keyed by the name an
+	// instantiation would write: its own directory's declarations bare,
+	// selectively imported names bare, and whole-directory imports as
+	// "Qualifier.Name" — never bare, since 0.8 qualifies them all.
 	modules map[string]*ModuleDef
 
 	LoadErrors []string
 }
 
-// LoadProject parses entryPath and every file its imports reach.
+// LoadProject parses entryPath and every directory its imports reach.
 //
-// stdlibRoot resolves `import <...>`. The compiler locates it next to the
-// hover binary via os.Executable(); hoverdeck is a different binary, so the
-// caller supplies the path explicitly instead of inheriting a wrong default.
-func LoadProject(entryPath, stdlibRoot string) (*Project, error) {
+// pkgs resolves `import <...>`. The compiler builds that table from lockfiles
+// and falls back to a stdlib beside its own executable; hoverdeck is a
+// different executable, so the table is supplied explicitly rather than
+// letting the fallback point at hoverdeck's own directory.
+func LoadProject(entryPath string, pkgs *Packages) (*Project, error) {
 	abs, err := filepath.Abs(entryPath)
 	if err != nil {
 		return nil, fmt.Errorf("resolve entry path: %w", err)
 	}
 	abs = filepath.Clean(abs)
 
+	if pkgs == nil {
+		pkgs = &Packages{Roots: map[string]string{}}
+	}
+	pkgs.install()
+
 	p := &Project{
 		Entry:      abs,
 		Root:       filepath.Dir(abs),
-		StdlibRoot: stdlibRoot,
+		Packages:   pkgs,
 		Files:      map[string]*File{},
+		dirModules: map[string]map[string]*ModuleDef{},
 		modules:    map[string]*ModuleDef{},
 	}
 
-	visiting := map[string]bool{}
-	if err := p.loadFile(abs, visiting); err != nil {
+	// The entry file is read first and on its own, so a missing or unreadable
+	// entry is a hard error rather than one line in a list of warnings.
+	if err := p.loadOne(abs); err != nil {
 		return nil, err
 	}
+
+	visiting := map[string]bool{}
+	p.followImports(abs, visiting)
+	p.groupByDirectory()
 	p.buildNamespace()
 	return p, nil
 }
 
-func (p *Project) loadFile(path string, visiting map[string]bool) error {
-	if visiting[path] {
-		return nil // cycle — the compiler reports it; here we just stop descending
-	}
+// loadOne reads and parses a single file.
+func (p *Project) loadOne(path string) error {
 	if _, done := p.Files[path]; done {
 		return nil
 	}
-	visiting[path] = true
-	defer delete(visiting, path)
-
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
 	}
-
-	f := ParseSource(path, string(raw))
-	p.Files[path] = f
+	p.Files[path] = ParseSource(path, string(raw))
 	p.Order = append(p.Order, path)
-
-	dir := filepath.Dir(path)
-	for i := range f.Imports {
-		imp := &f.Imports[i]
-		imp.Path = p.resolveImport(dir, imp.Raw, imp.IsSystem)
-		if _, statErr := os.Stat(imp.Path); statErr != nil {
-			imp.Resolved = false
-			p.LoadErrors = append(p.LoadErrors,
-				fmt.Sprintf("%s:%d: cannot resolve import %q (looked for %s)",
-					filepath.Base(path), imp.Line, imp.Raw, imp.Path))
-			continue
-		}
-		imp.Resolved = true
-		if err := p.loadFile(imp.Path, visiting); err != nil {
-			p.LoadErrors = append(p.LoadErrors, err.Error())
-		}
-	}
 	return nil
 }
 
-// resolveImport mirrors compiler/loader.resolveImportPath, with the stdlib
-// root injected rather than derived from the running executable.
-func (p *Project) resolveImport(currentDir, importPath string, isSystem bool) string {
-	if isSystem && p.StdlibRoot != "" {
-		rel := filepath.FromSlash(strings.TrimLeft(importPath, "/"))
-		return filepath.Clean(filepath.Join(p.StdlibRoot, rel))
+// followImports resolves one file's imports and loads every .hvr in each
+// directory they name, recursing into those files' own imports.
+//
+// Unlike the compiler's loader this never gives up on the first bad import:
+// hoverdeck is an editor, and a file being edited is unresolvable most of the
+// time. Each failure becomes a LoadError and the rest of the tree still loads.
+func (p *Project) followImports(path string, visiting map[string]bool) {
+	if visiting[path] {
+		return // cycle — the compiler reports it; here we just stop descending
 	}
-	return filepath.Clean(filepath.Join(currentDir, importPath))
+	visiting[path] = true
+	defer delete(visiting, path)
+
+	f := p.Files[path]
+	if f == nil {
+		return
+	}
+	for i := range f.Imports {
+		imp := &f.Imports[i]
+		p.resolveImport(path, imp)
+		if !imp.Resolved {
+			continue
+		}
+		// An import names a directory, so all of its files come in together
+		// and share one namespace.
+		for _, target := range imp.Files {
+			if err := p.loadOne(target); err != nil {
+				p.LoadErrors = append(p.LoadErrors, err.Error())
+				continue
+			}
+			p.followImports(target, visiting)
+		}
+	}
+}
+
+// groupByDirectory folds the loaded files into per-directory namespaces, which
+// is what a directory is since 0.8.
+func (p *Project) groupByDirectory() {
+	byDir := map[string][]string{}
+	for _, path := range p.Order {
+		dir := filepath.Dir(path)
+		byDir[dir] = append(byDir[dir], path)
+	}
+	for dir, files := range byDir {
+		p.dirModules[dir] = p.mergeDir(dir, files)
+	}
+}
+
+// resolveImport turns one import statement into the directory it names, using
+// exactly the compiler's resolution rules so the two can never disagree.
+func (p *Project) resolveImport(from string, imp *ResolvedImport) {
+	fail := func(format string, args ...any) {
+		imp.Resolved = false
+		p.LoadErrors = append(p.LoadErrors,
+			fmt.Sprintf("%s:%d: %s", filepath.Base(from), imp.Line, fmt.Sprintf(format, args...)))
+	}
+
+	// The 0.7 file-based spelling gets its own message rather than a confusing
+	// "not a directory", because naming the replacement makes the fix
+	// mechanical — this is the single most likely error in a file written
+	// against the previous release.
+	if strings.HasSuffix(imp.Raw, ".hvr") {
+		fail("an import names a directory, not a file — write %s instead of %s "+
+			"(every .hvr file in that directory is imported together)",
+			bracket(dirOfImport(imp.Raw), imp.IsSystem), bracket(imp.Raw, imp.IsSystem))
+		return
+	}
+
+	fromDir := filepath.Dir(from)
+	dir := loader.ResolveImportPath(fromDir, imp.Raw, imp.IsSystem)
+	imp.Dir = dir
+	imp.Package = loader.PackageOf(imp.Raw, imp.IsSystem)
+	imp.Qualifier = loader.QualifierFor(imp.Raw, imp.Alias)
+
+	if sameDir(dir, fromDir) {
+		fail("%q is this file's own directory — files in the same directory "+
+			"already share a namespace, so remove the import", imp.Raw)
+		return
+	}
+
+	files, err := loader.HvrFilesIn(dir)
+	if err != nil {
+		if hint := missingPackageHint(p.Packages, imp.Raw, imp.IsSystem); hint != "" {
+			fail("%s", hint)
+			return
+		}
+		fail("could not read imported directory %q (looked in %s)", imp.Raw, dir)
+		return
+	}
+	if len(files) == 0 {
+		fail("%q contains no .hvr files (%s)", imp.Raw, dir)
+		return
+	}
+
+	imp.Files = files
+	imp.Resolved = true
+}
+
+// missingPackageHint mirrors the compiler's diagnostic for an import whose
+// package is not installed. It is reproduced here rather than called because
+// the compiler's version consults a stdlib beside the running executable,
+// which for hoverdeck is the wrong directory.
+func missingPackageHint(pkgs *Packages, importPath string, isSystem bool) string {
+	if !isSystem {
+		return ""
+	}
+	name := importPath
+	if i := strings.IndexByte(strings.Trim(name, "/"), '/'); i >= 0 {
+		name = strings.Trim(name, "/")[:i]
+	}
+	if name == "" {
+		return ""
+	}
+	if _, installed := pkgs.Roots[name]; installed {
+		return "" // installed, so the missing thing is a directory inside it
+	}
+	for _, std := range hpm.StdlibImportNames() {
+		if name == std {
+			return fmt.Sprintf("the standard library is not installed, so %q cannot be found — "+
+				"run `hover --setup` (it downloads the standard library; this needs network access)", name)
+		}
+	}
+	return fmt.Sprintf("package %q is not installed — run `hover hpm install %s` "+
+		"(or check the path, if you meant a standard library directory)", name, name)
+}
+
+// dirOfImport strips the final segment of an import path, turning the 0.7
+// file spelling into the directory that replaces it. Import paths are always
+// slash-separated, whatever the platform.
+func dirOfImport(importPath string) string {
+	if i := strings.LastIndexByte(importPath, '/'); i >= 0 {
+		return importPath[:i]
+	}
+	return "."
+}
+
+func bracket(path string, isSystem bool) string {
+	if isSystem {
+		return "<" + path + ">"
+	}
+	return `"` + path + `"`
+}
+
+func sameDir(a, b string) bool {
+	ra, err1 := filepath.EvalSymlinks(a)
+	rb, err2 := filepath.EvalSymlinks(b)
+	if err1 == nil && err2 == nil {
+		return filepath.Clean(ra) == filepath.Clean(rb)
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
 }
 
 // ParseSource lexes and parses one file's text into a File.
@@ -193,48 +371,106 @@ func ParseSource(path, text string) *File {
 	if prog != nil {
 		for _, st := range prog.Statements {
 			if imp, ok := st.(*ast.ImportStatement); ok {
-				f.Imports = append(f.Imports, ResolvedImport{
-					Alias:    imp.Alias,
-					Raw:      imp.Path,
-					IsSystem: imp.IsSystem,
-					Line:     imp.Token.Line,
-				})
+				ri := ResolvedImport{
+					Alias:     imp.Alias,
+					Raw:       imp.Path,
+					IsSystem:  imp.IsSystem,
+					Line:      imp.Token.Line,
+					Selective: imp.Selective,
+				}
+				for _, n := range imp.Names {
+					ri.Selected = append(ri.Selected, SelectedName{Name: n.Name, Alias: n.Alias})
+				}
+				f.Imports = append(f.Imports, ri)
 			}
 		}
 	}
 	return f
 }
 
-// buildNamespace reproduces the elaborator's name resolution: the entry
-// file's declarations, plus bare imports merged flat, plus aliased imports
-// reachable only as "Alias.Name". Imports are non-transitive, so only the
-// entry file's own import list is consulted.
+// mergeDir folds every module declared by the files in one directory into a
+// single namespace, which is what a directory is since 0.8. A name declared
+// twice in one directory used to be legal in two different files and is now
+// an error — they share a namespace, so nothing could say which one a
+// reference meant.
+func (p *Project) mergeDir(dir string, files []string) map[string]*ModuleDef {
+	out := map[string]*ModuleDef{}
+	for _, path := range files {
+		f := p.Files[path]
+		if f == nil {
+			continue
+		}
+		for _, def := range p.modulesIn(f) {
+			if prev, dup := out[def.Name]; dup {
+				p.LoadErrors = append(p.LoadErrors, fmt.Sprintf(
+					"module '%s' is declared twice in %s — %s and %s. Files in one "+
+						"directory share a namespace, so the two names have to differ",
+					def.Name, dir, filepath.Base(prev.File), filepath.Base(def.File)))
+				continue
+			}
+			out[def.Name] = def
+		}
+	}
+	return out
+}
+
+// buildNamespace reproduces the elaborator's name resolution for the entry
+// file, as 0.8 defines it:
+//
+//   - its own DIRECTORY's declarations, bare — siblings share a namespace,
+//     so no import is involved;
+//   - `from <d> import X as Y;` — only the listed names, bare, under their
+//     local spelling;
+//   - `import <d>;` / `import <d> as N;` — everything behind the qualifier
+//     and NOTHING bare. This is the change that matters most from 0.7, where
+//     an unaliased import merged flat: `Diode` alone no longer resolves,
+//     `semiconductors.Diode` does.
+//
+// Imports stay non-transitive, so only the entry file's own list is consulted.
 func (p *Project) buildNamespace() {
 	entry := p.Files[p.Entry]
 	if entry == nil {
 		return
 	}
 
-	for _, def := range p.modulesIn(entry) {
-		p.modules[def.Name] = def
+	for name, def := range p.dirModules[filepath.Dir(p.Entry)] {
+		p.modules[name] = def
 	}
 
 	for _, imp := range entry.Imports {
 		if !imp.Resolved {
 			continue
 		}
-		f := p.Files[imp.Path]
-		if f == nil {
+		imported := p.dirModules[filepath.Clean(imp.Dir)]
+		if imported == nil {
 			continue
 		}
-		for _, def := range p.modulesIn(f) {
-			if imp.Alias != "" {
-				q := imp.Alias + "." + def.Name
-				def.QualifiedAs = q
-				p.modules[q] = def
-			} else if _, clash := p.modules[def.Name]; !clash {
-				p.modules[def.Name] = def
+
+		if imp.Selective {
+			for _, sym := range imp.Selected {
+				def, found := imported[sym.Name]
+				if !found {
+					continue // may be a function; the compiler decides
+				}
+				local := sym.Local()
+				if _, clash := p.modules[local]; clash {
+					continue // the compiler reports the collision
+				}
+				def.QualifiedAs = local
+				p.modules[local] = def
 			}
+			continue
+		}
+
+		for _, def := range imported {
+			q := imp.Qualifier + "." + def.Name
+			if _, own := p.modules[def.Name]; !own {
+				// Only rename a definition the entry's own directory has no
+				// claim on, so a module keeps the bare name it is declared
+				// under when it is also visible unqualified somewhere.
+				def.QualifiedAs = q
+			}
+			p.modules[q] = def
 		}
 	}
 }

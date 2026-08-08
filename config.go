@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+
+	"hoverdeck/internal/hvr"
 )
 
 // Settings is the small amount of machine-local state hoverdeck remembers
@@ -14,15 +16,16 @@ type Settings struct {
 	// HoverBin is the path to the `hover` compiler executable.
 	HoverBin string `json:"hoverBin"`
 
-	// WorkDir is the directory the compiler runs in. It matters: the hover
-	// CLI resolves `./runtime`, `./toolchain/zig` and its output files
-	// relative to the working directory, so this normally has to be the
-	// directory containing the hover binary. Empty means "use the binary's
-	// own directory", which is right for a standard checkout.
+	// WorkDir overrides the directory the compiler runs in.
+	//
+	// Empty is now the right answer almost always, and means "the project's
+	// own directory". Until 0.8 it had to be the hover install root, because
+	// the CLI resolved ./runtime and ./toolchain/zig relative to the working
+	// directory; 0.8 anchors both to the compiler executable's own directory
+	// instead, so `hover foo.hvr` works from anywhere. Running in the project
+	// is what a user expects — sim.cpp, sim and simulation_output.csv land
+	// next to the circuit that produced them rather than in the toolchain.
 	WorkDir string `json:"workDir"`
-
-	// StdlibRoot resolves `import <...>`. Empty means auto-detect.
-	StdlibRoot string `json:"stdlibRoot"`
 
 	// LastFile is reopened on the next launch.
 	LastFile string `json:"lastFile"`
@@ -64,7 +67,12 @@ func (s *Settings) Save() error {
 	return os.WriteFile(p, append(raw, '\n'), 0o644)
 }
 
-// EffectiveWorkDir is the directory the compiler should run in.
+// EffectiveWorkDir is the explicit working-directory override, or the
+// compiler's own directory when there is nothing better to fall back on.
+//
+// Callers that know which project is open should use App.runDir instead: the
+// project directory is the right default since 0.8, and this function cannot
+// see it.
 func (s *Settings) EffectiveWorkDir() string {
 	if s.WorkDir != "" {
 		return s.WorkDir
@@ -76,36 +84,50 @@ func (s *Settings) EffectiveWorkDir() string {
 }
 
 // SettingsView is what the UI reads and writes, plus derived diagnostics so
-// the settings dialog can tell the user whether the paths actually work.
+// the settings dialog can tell the user whether the installation actually
+// works.
 type SettingsView struct {
-	HoverBin      string `json:"hoverBin"`
-	WorkDir       string `json:"workDir"`
-	StdlibRoot    string `json:"stdlibRoot"`
-	ConfigPath    string `json:"configPath"`
-	BinOK         bool   `json:"binOK"`
-	RuntimeOK     bool   `json:"runtimeOK"`
+	HoverBin   string `json:"hoverBin"`
+	WorkDir    string `json:"workDir"`
+	ConfigPath string `json:"configPath"`
+
+	BinOK bool `json:"binOK"`
+
+	// RuntimeOK reports whether the C++ runtime is present beside the
+	// compiler. It is checked next to the BINARY, not next to the working
+	// directory: 0.8 resolves runtime/, toolchain/ and the standard library
+	// from the executable's own directory, which is what lets hover run from
+	// anywhere. A missing one means `hover --setup` has not been run.
+	RuntimeOK bool `json:"runtimeOK"`
+
+	// StdlibOK reports whether a standard library is installed, in ~/.hover or
+	// bundled beside a source checkout. Without it every `import <math>` fails.
+	StdlibOK bool `json:"stdlibOK"`
+
+	// NeedsSetup is the actionable form of the two flags above: the fix for
+	// both is the same single command.
+	NeedsSetup bool `json:"needsSetup"`
+
 	EffectiveBin  string `json:"effectiveBin"`
 	EffectiveWork string `json:"effectiveWork"`
 	Detected      string `json:"detected"`
+	Packages      int    `json:"packages"`
 	Note          string `json:"note"`
 }
 
 // view builds the UI's picture of the settings. `detected` is an auto-found
-// installation used when the user has not chosen one explicitly.
-func (s *Settings) view(detected string) *SettingsView {
+// installation used when the user has not chosen one explicitly; `work` is the
+// directory a run would actually happen in, and `pkgs` the import table it
+// would resolve against.
+func (s *Settings) view(detected, work string, pkgs *hvr.Packages) *SettingsView {
 	bin := s.HoverBin
 	if bin == "" {
 		bin = detected
-	}
-	work := s.WorkDir
-	if work == "" && bin != "" {
-		work = filepath.Dir(bin)
 	}
 
 	v := &SettingsView{
 		HoverBin:      s.HoverBin,
 		WorkDir:       s.WorkDir,
-		StdlibRoot:    s.StdlibRoot,
 		ConfigPath:    settingsPath(),
 		EffectiveBin:  bin,
 		EffectiveWork: work,
@@ -115,19 +137,24 @@ func (s *Settings) view(detected string) *SettingsView {
 		if st, err := os.Stat(bin); err == nil && !st.IsDir() {
 			v.BinOK = true
 		}
-	}
-	if work != "" {
-		// The CLI links against ./runtime/... from its working directory.
-		if st, err := os.Stat(filepath.Join(work, "runtime")); err == nil && st.IsDir() {
+		if st, err := os.Stat(filepath.Join(filepath.Dir(bin), "runtime")); err == nil && st.IsDir() {
 			v.RuntimeOK = true
 		}
 	}
+	if pkgs != nil {
+		v.StdlibOK = pkgs.StdlibInstalled
+		v.Packages = len(pkgs.Roots)
+	}
+	v.NeedsSetup = v.BinOK && (!v.RuntimeOK || !v.StdlibOK)
+
 	switch {
 	case !v.BinOK:
 		v.Note = "Select the hover compiler executable to enable Run."
 	case !v.RuntimeOK:
-		v.Note = "No runtime/ directory in the working directory — the compiler links " +
-			"against ./runtime, so it usually has to run from the hover checkout root."
+		v.Note = "No runtime/ beside the compiler — run `hover --setup` once to build it."
+	case !v.StdlibOK:
+		v.Note = "No standard library installed — run `hover --setup` to download it. " +
+			"Releases do not bundle it, so `import <math>` cannot resolve until you do."
 	case s.HoverBin == "":
 		v.Note = "Ready — using auto-detected " + bin
 	default:

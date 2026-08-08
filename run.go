@@ -20,6 +20,11 @@ import (
 // sim.cpp, build it with Zig, then run the simulation — so output is streamed
 // to the UI line by line as it arrives rather than collected and dumped at the
 // end. A long transient would otherwise look like a hang.
+//
+// The same machinery runs `hover --setup` and `hover hpm ...`, which are the
+// other two things 0.8 asks a user to do from a terminal: they stream progress
+// the same way and only one of the three may be in flight at a time, since
+// they all write to the same install.
 type Runner struct {
 	mu      sync.Mutex
 	cmd     *exec.Cmd
@@ -42,13 +47,48 @@ func (r *Runner) Running() bool {
 	return r.running
 }
 
-// Start launches the compiler on entryFile and streams its output.
+// Start compiles and simulates entryFile, streaming the compiler's output.
 //
 // Events emitted:
 //
 //	run:line   one line of combined stdout/stderr
 //	run:done   a RunStatus
 func (r *Runner) Start(a *App, entryFile string) error {
+	// The entry file is passed absolute so the run is independent of where it
+	// happens to be launched from.
+	abs, err := filepath.Abs(entryFile)
+	if err != nil {
+		return err
+	}
+	return r.start(a, []string{abs}, a.runDir(), true)
+}
+
+// Setup runs `hover --setup`: find a Zig toolchain, build the C++ runtime, and
+// download the standard library into ~/.hover. Releases ship no standard
+// library, so this is the step that makes `import <math>` resolve at all — and
+// the one thing hoverdeck cannot do for the user itself, since it needs
+// network access and writes to the install.
+func (r *Runner) Setup(a *App) error {
+	bin := a.effectiveBin()
+	if bin == "" {
+		return fmt.Errorf("no hover compiler configured — set its location in Settings")
+	}
+	return r.start(a, []string{"--setup"}, filepath.Dir(bin), false)
+}
+
+// HPM runs `hover hpm <args...>` in the project directory, which is where the
+// hover.toml and hover.lock it reads and writes live.
+func (r *Runner) HPM(a *App, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("hpm needs a command (install, update, remove, list, verify, index, clean)")
+	}
+	return r.start(a, append([]string{"hpm"}, args...), a.runDir(), false)
+}
+
+// start launches the compiler with args and streams its output. wantCSV marks
+// the invocations that produce simulation results, so a package command does
+// not report a stale CSV as its own output.
+func (r *Runner) start(a *App, args []string, workDir string, wantCSV bool) error {
 	r.mu.Lock()
 	if r.running {
 		r.mu.Unlock()
@@ -64,22 +104,11 @@ func (r *Runner) Start(a *App, entryFile string) error {
 		return fmt.Errorf("hover compiler not found at %s", bin)
 	}
 
-	// The working directory decides where ./runtime and ./toolchain/zig
-	// resolve, so it defaults to the compiler's own directory rather than the
-	// project's — running from the project would fail at the link step.
-	workDir := a.settings.WorkDir
 	if workDir == "" {
 		workDir = filepath.Dir(bin)
 	}
 
-	// The entry file is passed absolute, because the working directory is the
-	// compiler's install root rather than the project directory.
-	abs, err := filepath.Abs(entryFile)
-	if err != nil {
-		return err
-	}
-
-	cmd := exec.Command(bin, abs)
+	cmd := exec.Command(bin, args...)
 	cmd.Dir = workDir
 	setProcessGroup(cmd) // so Stop can take the whole tree down
 
@@ -101,7 +130,7 @@ func (r *Runner) Start(a *App, entryFile string) error {
 
 	started := time.Now()
 	emit := func(line string) { wruntime.EventsEmit(a.ctx, "run:line", line) }
-	emit(fmt.Sprintf("$ %s %s", bin, abs))
+	emit(fmt.Sprintf("$ %s %s", bin, strings.Join(args, " ")))
 	emit(fmt.Sprintf("  (working directory: %s)", workDir))
 
 	go func() {
@@ -132,9 +161,11 @@ func (r *Runner) Start(a *App, entryFile string) error {
 		}
 
 		// The runtime writes results next to wherever the simulation ran.
-		csv := filepath.Join(workDir, "simulation_output.csv")
-		if st, err := os.Stat(csv); err == nil && !st.IsDir() {
-			status.CSVPath = csv
+		if wantCSV {
+			csv := filepath.Join(workDir, "simulation_output.csv")
+			if st, err := os.Stat(csv); err == nil && !st.IsDir() {
+				status.CSVPath = csv
+			}
 		}
 		wruntime.EventsEmit(a.ctx, "run:done", status)
 	}()

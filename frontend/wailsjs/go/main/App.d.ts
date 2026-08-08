@@ -18,6 +18,8 @@ export function DeleteBlock(arg1:string,arg2:hvr.Span):Promise<void>;
 
 export function GetCatalog():Promise<main.Catalog>;
 
+export function GetPackages():Promise<hvr.Packages>;
+
 export function GetSettings():Promise<main.SettingsView>;
 
 export function GetSheet(arg1:string):Promise<hvr.Sheet>;
@@ -46,8 +48,6 @@ export function PickPlot():Promise<main.PlotInfo>;
 
 export function PickProject():Promise<main.ProjectInfo>;
 
-export function PickStdlibRoot():Promise<main.ProjectInfo>;
-
 export function PickWorkDir():Promise<main.SettingsView>;
 
 export function PlotCompute(arg1:string,arg2:string):Promise<main.PlotInfo>;
@@ -72,15 +72,21 @@ export function PlotTHD(arg1:plot.FFTOptions):Promise<plot.THDResult>;
 
 export function ReadFile(arg1:string):Promise<main.SourceFile>;
 
+export function RefreshPackages():Promise<main.ProjectInfo>;
+
 export function Reload():Promise<main.ProjectInfo>;
 
 export function RenameNet(arg1:string,arg2:string,arg3:string):Promise<number>;
 
 export function Run():Promise<void>;
 
+export function RunHPM(arg1:Array<string>):Promise<void>;
+
+export function RunSetup():Promise<void>;
+
 export function SaveFile(arg1:string,arg2:string):Promise<main.ProjectInfo>;
 
-export function SaveSettings(arg1:string,arg2:string,arg3:string):Promise<main.SettingsView>;
+export function SaveSettings(arg1:string,arg2:string):Promise<main.SettingsView>;
 
 export function SetBlockIcon(arg1:string,arg2:string,arg3:string):Promise<void>;
 
@@ -101,8 +107,6 @@ export function SetPortNet(arg1:string,arg2:hvr.Span,arg3:string):Promise<void>;
 export function SetSignalPosition(arg1:string,arg2:string,arg3:number,arg4:number):Promise<void>;
 
 export function SetSpanText(arg1:string,arg2:hvr.Span,arg3:string):Promise<void>;
-
-export function SetStdlibRoot(arg1:string):Promise<main.ProjectInfo>;
 
 export function StopRun():Promise<void>;
 

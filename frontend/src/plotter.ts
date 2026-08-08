@@ -12,9 +12,32 @@ import * as API from '../wailsjs/go/main/App';
 import { esc } from './canvas';
 import type { PlotInfo, Trace, Spectrum, Measurement, THDResult } from './types';
 
+/**
+ * Reads a design token. Canvas 2D cannot resolve `var()`, so anything drawn
+ * into the bitmap has to look the value up — going through the tokens rather
+ * than hardcoding hex keeps the plot and the DOM in step.
+ */
+const css = (name: string): string =>
+  getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+/**
+ * Trace colours.
+ *
+ * The design system's four colours plus green do the work, in domain order:
+ * yellow is the discrete/logic side, blue the continuous/plant side, red the
+ * seam. Past the fifth trace there is nothing left in the brand, so the tail
+ * is tints of the same five — flagged as an extension, like `--color-green`.
+ * A run with fifty saved nodes is meant to be read a few signals at a time.
+ */
 const PALETTE = [
-  '#4c9aff', '#23c8a0', '#f5a524', '#ff7bac', '#b072ff',
-  '#4bd4ff', '#8bd450', '#ff8f5e', '#e05d7a', '#9aa4b8',
+  '#ffd21e', // yellow — logic
+  '#5b86ff', // blue-bright, lightened to read on navy ink — physics
+  '#e8202a', // red — the seam
+  '#f2ead2', // cream
+  '#3fbf7f', // green, lightened for on-navy
+  '#ffe98a', // yellow tint
+  '#a9c0ff', // blue tint
+  '#9aa3c4', // on-inverse muted
 ];
 
 interface SignalState {
@@ -58,13 +81,13 @@ export class Plotter {
     this.host.innerHTML = `
       <div class="plot-shell">
         <div class="plot-bar">
-          <strong>Waveform viewer</strong>
+          <span class="hv-label" style="color:var(--color-yellow)">Scope</span>
           <span class="plot-file" id="pl-file">no results loaded</span>
           <span class="grow"></span>
-          <button id="pl-open">Open CSV…</button>
-          <button id="pl-fit">Fit</button>
-          <button id="pl-export">Export…</button>
-          <button id="pl-close">Close</button>
+          <button id="pl-open" class="inverse">Open CSV</button>
+          <button id="pl-fit" class="inverse">Fit</button>
+          <button id="pl-export" class="inverse">Export</button>
+          <button id="pl-close" class="inverse">Close</button>
         </div>
         <div class="plot-body">
           <div class="plot-canvas-wrap">
@@ -265,13 +288,15 @@ export class Plotter {
     const W = this.plotW(), H = this.plotH();
 
     c.save();
-    c.fillStyle = '#0d0f14';
+    c.fillStyle = css('--surface-inverse');
     c.fillRect(L, T, W, H);
 
-    c.strokeStyle = '#262d3d';
+    // Hairlines inside the panel, the 2px keyline around it — the same rule
+    // the DOM panels follow.
+    c.strokeStyle = css('--canvas-hair');
     c.lineWidth = 1;
-    c.font = '10px ui-monospace, monospace';
-    c.fillStyle = '#6b7590';
+    c.font = '10px "Space Mono", ui-monospace, monospace';
+    c.fillStyle = css('--text-on-inverse-muted');
 
     const [xa, xb] = this.mode === 'fft' ? this.fftRange() : [this.x0, this.x1];
     for (const v of ticks(xa, xb, 8)) {
@@ -292,7 +317,7 @@ export class Plotter {
 
     // The second axis only appears when something is assigned to it.
     if (this.hasY2()) {
-      c.fillStyle = '#f5a524';
+      c.fillStyle = css('--color-yellow');
       for (const v of ticks(this.y2Lo, this.y2Hi, 6)) {
         const y = Math.round(this.sy(v, 'y2')) + 0.5;
         if (y < T || y > T + H) continue;
@@ -301,13 +326,16 @@ export class Plotter {
       }
     }
 
-    c.strokeStyle = '#3a4358';
-    c.strokeRect(L + 0.5, T + 0.5, W, H);
+    c.strokeStyle = css('--color-cream');
+    c.lineWidth = 2;
+    c.strokeRect(L + 1, T + 1, W - 2, H - 2);
 
-    c.fillStyle = '#9aa4b8';
+    // The axis title is an uppercase mono label, like every other label.
+    c.fillStyle = css('--color-cream');
+    c.font = 'bold 10px "Space Mono", ui-monospace, monospace';
     c.textAlign = 'center';
-    c.fillText(this.mode === 'fft' ? 'Frequency (Hz)' : (this.info?.xKey ?? 'x'),
-               L + W / 2, T + H + 32);
+    const xTitle = this.mode === 'fft' ? 'frequency · Hz' : (this.info?.xKey ?? 'x');
+    c.fillText(xTitle.toUpperCase(), L + W / 2, T + H + 32);
     c.restore();
   }
 
@@ -349,8 +377,8 @@ export class Plotter {
     c.beginPath();
     c.rect(this.pad.l, this.pad.t, this.plotW(), this.plotH());
     c.clip();
-    c.strokeStyle = '#4c9aff';
-    c.lineWidth = 1.4;
+    c.strokeStyle = css('--domain-physics');
+    c.lineWidth = 1.6;
     c.beginPath();
     for (let i = 0; i < sp.freqs.length; i++) {
       const x = this.sx(sp.freqs[i]);
@@ -368,7 +396,8 @@ export class Plotter {
     if (this.cursor.x < L || this.cursor.x > L + W) return;
 
     c.save();
-    c.strokeStyle = '#55607a';
+    c.strokeStyle = css('--color-yellow');
+    c.lineWidth = 1;
     c.setLineDash([3, 3]);
     c.beginPath();
     c.moveTo(this.cursor.x, T);
@@ -388,8 +417,12 @@ export class Plotter {
       if (this.mode === 'time' && !st?.on) continue;
       const i = nearestIndex(tr.x, xv);
       if (i < 0) continue;
-      const col = this.mode === 'fft' ? '#4c9aff' : (st?.color ?? '#fff');
-      rows.push(`<span style="color:${col}">■</span> ${esc(tr.name)} = ${fmtEng(tr.y[i])}`);
+      const col = this.mode === 'fft' ? PALETTE[1] : (st?.color ?? PALETTE[3]);
+      // A square keyed swatch, matching the domain swatches in the rails.
+      rows.push(
+        `<span style="display:inline-block;width:9px;height:9px;background:${col};` +
+        `border:1px solid #000;vertical-align:middle"></span> ` +
+        `${esc(tr.name)} = ${fmtEng(tr.y[i])}`);
     }
     const ro = this.host.querySelector('#pl-readout') as HTMLElement;
     ro.innerHTML = rows.join('<br>');
@@ -481,7 +514,7 @@ export class Plotter {
             <option value="y2"${s.axis === 'y2' ? ' selected' : ''}>Y2</option>
           </select>
           ${info.computed?.includes(name)
-            ? `<span class="del" data-del="${esc(name)}" title="Remove computed curve">✕</span>` : ''}
+            ? `<span class="del" data-del="${esc(name)}" title="Remove computed curve">×</span>` : ''}
         </div>`;
     }).join('');
 

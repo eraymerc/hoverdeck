@@ -11,10 +11,17 @@
  */
 
 import { esc } from './canvas';
+import { ui } from './ui';
 
+// `from` is in here even though the language does not reserve it — it starts
+// an import only when a path follows, and stays a usable identifier
+// otherwise. Highlighting it costs a false positive on a port named `from`,
+// which is worth it: `from <math> import sin;` is the line a reader most
+// needs to see as an import.
 const KEYWORDS = new Set([
   'module', 'analog', 'digital', 'func', 'state', 'if', 'else', 'while',
-  'return', 'input', 'output', 'import', 'importc', 'as', 'extern',
+  'return', 'input', 'output', 'import', 'from', 'importc', 'as', 'extern',
+  'struct',
 ]);
 
 const TYPES = new Set(['wire', 'double', 'float', 'int', 'unsigned', 'void']);
@@ -83,8 +90,9 @@ export function highlight(src: string): string {
       }
     }
 
-    // Angle-bracket import paths: import <math/math.hvr>;
-    if (c === '<' && /import\s*$/.test(src.slice(Math.max(0, i - 12), i))) {
+    // Angle-bracket import paths, which name a directory: `import <math>;`
+    // and `from <semiconductors> import Diode;`.
+    if (c === '<' && /\b(import|from)\s*$/.test(src.slice(Math.max(0, i - 12), i))) {
       let j = i + 1;
       while (j < n && src[j] !== '>' && src[j] !== '\n') j++;
       j = Math.min(j + 1, n);
@@ -167,8 +175,8 @@ export class Editor {
         <button id="find-prev" title="Previous (Shift+Enter)">↑</button>
         <button id="find-next" title="Next (Enter)">↓</button>
         <button id="find-aa" title="Match case">Aa</button>
-        <button id="find-rep-toggle" title="Replace">⇄</button>
-        <button id="find-close" title="Close (Esc)">✕</button>
+        <button id="find-rep-toggle" title="Replace">${ui('replace', 12)}</button>
+        <button id="find-close" title="Close (Esc)">×</button>
       </div>
       <div class="find-bar replace" id="replace-bar" style="display:none">
         <input id="find-r" placeholder="Replace with"/>
@@ -190,7 +198,7 @@ export class Editor {
         <span class="pos">—</span>
         <span class="grow"></span>
         <span class="ro" style="display:none">read-only</span>
-        <button class="save-btn" disabled>Save</button>
+        <button class="save-btn primary" disabled>Save</button>
       </div>`;
 
     this.gutter = this.el.querySelector('.gutter')!;

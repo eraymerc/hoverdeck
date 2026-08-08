@@ -6,8 +6,11 @@ import { Canvas, esc } from './canvas';
 import { Editor } from './editor';
 import { iconSvg, ICON_IDS } from './icons';
 import { Plotter } from './plotter';
+import { ui } from './ui';
+import logoLockupMark from './assets/logo-lockup-mark.svg';
+import logoDisc from './assets/logo-disc.svg';
 import type {
-  Catalog, CatalogEntry, InsertRequest, PrimitiveDef,
+  Catalog, CatalogEntry, InsertRequest, Packages, PrimitiveDef,
   PlotInfo, ProjectInfo, RunStatus, SafeBlock as Block, SafeSheet, SettingsView,
   Sheet, Signal, SourceFile, TreeNode, Workspace,
 } from './types';
@@ -53,16 +56,26 @@ let plotter: Plotter;
 function shell() {
   document.querySelector('#app')!.innerHTML = `
     <div class="toolbar">
-      <div class="brand">hover<span>deck</span></div>
-      <button id="btn-open">Open…</button>
-      <button id="btn-main" title="Open the entry file in the editor">Edit main.hvr</button>
-      <button id="btn-reload" title="Re-read every file from disk">Reload</button>
-      <button id="btn-run" class="primary" title="Compile and simulate (Ctrl+R)">▶ Run</button>
-      <button id="btn-stop" title="Stop the run" disabled>■</button>
-      <button id="btn-plot" title="Open the waveform viewer">📈 Plot</button>
+      <!-- The horizontal lockup, built the way the design system builds it:
+           the mark artwork plus a live Archivo Black wordmark sheared -9deg,
+           never an outlined SVG. Below a 40px mark the tagline drops. -->
+      <div class="brand">
+        <img src="${logoLockupMark}" alt="hoverdeck"/>
+        <span class="wordmark">HOVER<span>DECK</span></span>
+      </div>
+      <span class="ver">v0.8.0</span>
+
+      <button id="btn-open" class="inverse" title="Open a file or folder (Ctrl+O)">${ui('folder-open', 14)}Open</button>
+      <button id="btn-main" class="inverse" title="Open the entry file in the editor">${ui('file-code', 14)}Entry</button>
+      <button id="btn-reload" class="inverse" title="Re-read every file from disk">${ui('refresh-cw', 14)}Reload</button>
+      <button id="btn-run" class="primary" title="Compile and simulate (Ctrl+R)">${ui('play', 14)}Run sim</button>
+      <button id="btn-stop" class="inverse icon" title="Stop the run" disabled>${ui('stop', 14)}</button>
+      <button id="btn-plot" class="inverse" title="Open the waveform viewer">${ui('waves', 14)}Scope</button>
+
       <div class="crumbs" id="crumbs"></div>
       <span class="file-name" id="entry-name"></span>
-      <button id="btn-settings" title="Settings">⚙</button>
+      <button id="btn-theme" class="inverse icon" title="Switch theme"></button>
+      <button id="btn-settings" class="inverse icon" title="Settings">${ui('sliders-horizontal', 14)}</button>
     </div>
 
     <div class="main" id="main">
@@ -71,7 +84,7 @@ function shell() {
           <div class="tab" data-lt="blocks">Blocks</div>
           <div class="tab" data-lt="files">Files</div>
         </div>
-        <div class="search-wrap"><input id="pal-search" placeholder="Search blocks…"/></div>
+        <div class="search-wrap"><input id="pal-search" placeholder="search blocks"/></div>
         <div class="pane-body" id="left-body"></div>
       </div>
 
@@ -85,8 +98,8 @@ function shell() {
             <span class="run-dot" id="run-dot"></span>
             <span id="con-title">Output</span>
             <span class="grow"></span>
-            <button id="con-clear">Clear</button>
-            <button id="con-hide">Hide</button>
+            <button id="con-clear" class="inverse">Clear</button>
+            <button id="con-hide" class="inverse">Hide</button>
           </div>
           <div class="console-body" id="console-body"></div>
         </div>
@@ -98,7 +111,7 @@ function shell() {
       <div class="pane right">
         <div class="tabs">
           <div class="tab" data-rt="inspect">Inspector</div>
-          <div class="tab" data-rt="code">Code</div>
+          <div class="tab" data-rt="code">Source</div>
         </div>
         <div class="pane-body" id="insp-body" style="display:none"></div>
         <div id="code-body" style="display:none; flex:1; min-height:0; flex-direction:column;"></div>
@@ -208,10 +221,40 @@ function shell() {
     if (k === 'v') { e.preventDefault(); transformBlock(blk, 'flipY'); }
   });
 
+  initTheme();
   initSplitters();
   initRunEvents();
   renderLeft();
   renderRight();
+}
+
+// ── Theme ────────────────────────────────────────────────────────────────
+
+/**
+ * Dark and light are the same brand with the surface roles swapped, so the
+ * choice is purely about the room you are sitting in — a per-machine view
+ * preference, like the pane widths, not project data.
+ *
+ * Dark is the default: this is an editor that gets stared at for hours.
+ */
+function initTheme() {
+  const KEY = 'hoverdeck.theme';
+  const btn = document.getElementById('btn-theme')!;
+
+  const apply = (theme: 'dark' | 'light') => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem(KEY, theme);
+    // The icon names what a click gets you, not what you are looking at.
+    btn.innerHTML = ui(theme === 'dark' ? 'sun' : 'moon', 14);
+    btn.title = theme === 'dark' ? 'Switch to light' : 'Switch to dark';
+    // The plotter draws into a bitmap and reads its colours from the tokens,
+    // so it has to be told to repaint.
+    plotter?.resize();
+  };
+
+  apply(localStorage.getItem(KEY) === 'light' ? 'light' : 'dark');
+  btn.addEventListener('click', () =>
+    apply(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
 }
 
 // ── Resizable panes ──────────────────────────────────────────────────────
@@ -318,23 +361,59 @@ function classifyLine(t: string): string {
   return '';
 }
 
+/**
+ * What the compiler is currently being used for.
+ *
+ * All three stream through the same console and the same run:line/run:done
+ * events — they are one binary and only one may be in flight — but they end
+ * differently: a simulation opens its results, while setup and hpm change
+ * which packages exist and so have to invalidate the import table instead.
+ */
+type RunKind = 'run' | 'setup' | 'hpm';
+let runKind: RunKind = 'run';
+
 function setRunning(on: boolean) {
   state.running = on;
   (document.getElementById('btn-run') as HTMLButtonElement).disabled = on || !state.project;
   (document.getElementById('btn-stop') as HTMLButtonElement).disabled = !on;
   const dot = document.getElementById('run-dot')!;
   dot.className = 'run-dot' + (on ? ' busy' : '');
-  document.getElementById('con-title')!.textContent = on ? 'Running…' : 'Output';
+  const busy = { run: 'Compiling · running', setup: 'Setting up', hpm: 'Packages' }[runKind];
+  document.getElementById('con-title')!.textContent = on ? busy : 'Output';
 }
 
 function initRunEvents() {
   EventsOn('run:line', (line: string) => conLine(line));
-  EventsOn('run:done', (st: RunStatus) => {
+  EventsOn('run:done', async (st: RunStatus) => {
+    const kind = runKind;
     setRunning(false);
+
+    if (kind !== 'run') {
+      const dot = document.getElementById('run-dot')!;
+      dot.className = 'run-dot ' + (st.failed ? 'err' : 'ok');
+      const label = kind === 'setup' ? 'SETUP' : 'HPM';
+      conLine(st.failed ? `${label} FAILED — ${st.message}` : `${label} OK — ${st.message}`);
+      document.getElementById('con-title')!.textContent = st.failed ? 'Failed' : 'Finished';
+      if (!st.failed) {
+        // The package table is what just changed, so the palette and every
+        // unresolved import have to be rebuilt against it.
+        try {
+          const info = (await API.RefreshPackages()) as unknown as ProjectInfo;
+          if (info?.open) state.project = info;
+          await loadCatalog();
+          await refreshSheet();
+          renderAll();
+        } catch (e) { showErr(e); }
+      }
+      toast(st.failed ? `${label} failed — ${st.message}` : `${label} finished`, st.failed ? 'err' : 'ok');
+      return;
+    }
+
     const dot = document.getElementById('run-dot')!;
     dot.className = 'run-dot ' + (st.failed ? 'err' : 'ok');
-    const secs = st.seconds ? ` in ${st.seconds.toFixed(1)}s` : '';
-    conLine(st.failed ? `✗ ${st.message}${secs}` : `✓ ${st.message}${secs}`);
+    // State what happened and where, in that order — no symbols, no apologies.
+    const secs = st.seconds ? ` in ${st.seconds.toFixed(1)} s` : '';
+    conLine(st.failed ? `RUN FAILED — ${st.message}${secs}` : `RUN OK — ${st.message}${secs}`);
     if (st.csvPath) conLine(`  results: ${st.csvPath}`);
     document.getElementById('con-title')!.textContent = st.failed ? 'Failed' : 'Finished';
     toast(st.failed ? `Run failed — ${st.message}` : `Run finished${secs}`, st.failed ? 'err' : 'ok');
@@ -381,12 +460,57 @@ async function runProject() {
     openSettings();
     return;
   }
+  // A compiler that has never been set up cannot link the runtime or resolve
+  // `import <math>`. Saying so here beats letting the run fail three stages in
+  // with a message about a missing archive.
+  if (s.needsSetup) {
+    toast('This install needs `hover --setup` first', 'err');
+    openSettings();
+    return;
+  }
 
   showConsole(true);
   document.getElementById('console-body')!.innerHTML = '';
+  runKind = 'run';
   setRunning(true);
   try {
     await API.Run();
+  } catch (e) {
+    setRunning(false);
+    showErr(e);
+  }
+}
+
+/**
+ * Runs `hover --setup`: build the C++ runtime and download the standard
+ * library into ~/.hover.
+ *
+ * Needed once per installation, and the only step hoverdeck cannot do itself —
+ * it needs network access and writes into the install. Releases ship no
+ * standard library, so until this has run, every `import <math>` fails.
+ */
+async function runSetup() {
+  if (state.running) { toast('Something is already running', 'err'); return; }
+  showConsole(true);
+  document.getElementById('console-body')!.innerHTML = '';
+  runKind = 'setup';
+  setRunning(true);
+  try {
+    await API.RunSetup();
+  } catch (e) {
+    setRunning(false);
+    showErr(e);
+  }
+}
+
+/** Runs `hover hpm <args>` in the project folder. */
+async function runHPM(args: string[]) {
+  if (state.running) { toast('Something is already running', 'err'); return; }
+  showConsole(true);
+  runKind = 'hpm';
+  setRunning(true);
+  try {
+    await API.RunHPM(args);
   } catch (e) {
     setRunning(false);
     showErr(e);
@@ -420,23 +544,30 @@ async function openSettings() {
     </div>
     <div class="row">
       <label>working dir</label>
-      <input id="s-work" value="${esc(s.workDir)}" placeholder="defaults to the binary's directory"/>
+      <input id="s-work" value="${esc(s.workDir)}" placeholder="defaults to the project folder"/>
       <button id="s-work-pick">…</button>
     </div>
     <div class="hint" style="margin:6px 0 0">
-      The compiler resolves <code>./runtime</code> and <code>./toolchain/zig</code> from its
-      working directory and writes <code>sim.cpp</code> there, so this normally has to be the
-      root of your hover checkout.
+      Leave this empty. Since 0.8 the compiler resolves <code>runtime/</code>,
+      <code>toolchain/</code> and the standard library from its own location, so runs
+      happen in your project folder and <code>sim.cpp</code>, <code>sim</code> and
+      <code>simulation_output.csv</code> land beside the circuit.
     </div>
 
     <div class="insp-title" style="margin:14px 0 6px">Standard library</div>
+    <div class="hint" style="margin:0 0 8px">
+      ${s.stdlibOK
+        ? `Installed — ${s.packages} package root${s.packages === 1 ? '' : 's'} visible.
+           <code>hover hpm install</code> adds more.`
+        : `Not installed. Releases do not bundle it, so
+           <code>import &lt;math&gt;</code> cannot resolve until you run setup once.`}
+    </div>
     <div class="row">
-      <label>stdlib root</label>
-      <input id="s-std" value="${esc(s.stdlibRoot)}" placeholder="auto-detected"/>
-      <button id="s-std-pick">…</button>
+      <label></label>
+      <button id="s-setup" ${s.binOK ? '' : 'disabled'}>Run hover --setup</button>
     </div>
 
-    <div class="err-item" id="s-note" style="color:${s.binOK && s.runtimeOK ? 'var(--ok)' : 'var(--state)'}">
+    <div class="err-item" id="s-note" style="color:${s.binOK && s.runtimeOK && s.stdlibOK ? 'var(--status-ok)' : 'var(--text-link-hover)'}">
       ${esc(s.note)}
     </div>
 
@@ -447,7 +578,6 @@ async function openSettings() {
 
   const bin = root.querySelector('#s-bin') as HTMLInputElement;
   const work = root.querySelector('#s-work') as HTMLInputElement;
-  const std = root.querySelector('#s-std') as HTMLInputElement;
 
   root.querySelector('#s-bin-pick')!.addEventListener('click', async () => {
     const v = (await API.PickHoverBinary()) as unknown as SettingsView;
@@ -460,15 +590,21 @@ async function openSettings() {
     work.value = v.workDir;
     (root.querySelector('#s-note') as HTMLElement).textContent = v.note;
   });
-  root.querySelector('#s-std-pick')!.addEventListener('click', async () => {
-    const info = (await API.PickStdlibRoot()) as unknown as ProjectInfo;
-    std.value = info.stdlibRoot ?? '';
+  // Setup downloads the standard library and builds the runtime, which takes
+  // long enough to watch: the dialog closes so its output is visible in the
+  // console, exactly as a run would be.
+  root.querySelector('#s-setup')!.addEventListener('click', async () => {
+    try {
+      await API.SaveSettings(bin.value.trim(), work.value.trim());
+      close();
+      await runSetup();
+    } catch (e) { showErr(e); }
   });
 
   root.querySelector('[data-x="no"]')!.addEventListener('click', close);
   root.querySelector('[data-x="yes"]')!.addEventListener('click', async () => {
     try {
-      await API.SaveSettings(bin.value.trim(), work.value.trim(), std.value.trim());
+      await API.SaveSettings(bin.value.trim(), work.value.trim());
       close();
       const info = (await API.Info()) as unknown as ProjectInfo;
       state.project = info;
@@ -508,14 +644,14 @@ function openAny(): Promise<void> {
       <h3>Open</h3>
       <div class="hint">Choose what to open.</div>
       <div class="open-choice" data-pick="file">
-        <div class="oc-icon">📄</div>
+        <div class="oc-icon">${ui('file-code', 22)}</div>
         <div>
           <div class="oc-title">Hover file</div>
           <div class="oc-sub">Load one <code>.hvr</code> as the circuit and draw it.</div>
         </div>
       </div>
       <div class="open-choice" data-pick="folder">
-        <div class="oc-icon">📁</div>
+        <div class="oc-icon">${ui('folder', 22)}</div>
         <div>
           <div class="oc-title">Folder / workspace</div>
           <div class="oc-sub">Browse a project tree. A lone <code>main.hvr</code> loads automatically.</div>
@@ -639,7 +775,7 @@ function renderCrumbs() {
   const crumbs = state.stack.map((q, i) => {
     const last = i === state.stack.length - 1;
     return `<span class="crumb ${last ? 'active' : ''}" data-goto="${esc(q)}">${esc(q)}</span>` +
-           (last ? '' : '<span class="crumb-sep">›</span>');
+           (last ? '' : '<span class="crumb-sep">/</span>');
   }).join('');
 
   el.innerHTML =
@@ -914,7 +1050,7 @@ function primItem(p: PrimitiveDef): string {
 function modItem(e: CatalogEntry): string {
   const payload = JSON.stringify({
     kind: 'module', name: e.name, importPath: e.importPath,
-    alias: e.suggestAlias, group: e.group,
+    qualifier: e.qualifier, alias: e.suggestAlias, group: e.group,
   });
   const ports = (e.physPorts ?? []).length;
   return `
@@ -939,9 +1075,9 @@ function filesHtml(): string {
       <div class="ws-head">
         <span class="ws-name" title="${esc(ws.root)}">${esc(ws.name)}</span>
         <span class="grow"></span>
-        <button class="mini" id="ws-newfile" title="New file">＋file</button>
-        <button class="mini" id="ws-newdir" title="New folder">＋dir</button>
-        <button class="mini" id="ws-close" title="Close folder">✕</button>
+        <button class="mini" id="ws-newfile" title="New file">${ui('plus', 11)}file</button>
+        <button class="mini" id="ws-newdir" title="New folder">${ui('plus', 11)}dir</button>
+        <button class="mini" id="ws-close" title="Close folder">${ui('x', 11)}</button>
       </div>`;
     html += treeHtml(ws.tree ?? [], 0);
   }
@@ -949,15 +1085,28 @@ function filesHtml(): string {
   // The files the compiler actually reaches from the open circuit. This is a
   // different question from "what is in the folder", so both are shown.
   if (p) {
-    const own = (p.files ?? []).filter((f) => !f.isStdlib);
-    const std = (p.files ?? []).filter((f) => f.isStdlib);
+    const files = p.files ?? [];
+    const own = files.filter((f) => !f.package);
     const row = (f: typeof own[number]) => `
       <div class="file-item ${f.path === state.editorFile ? 'active' : ''}" data-path="${esc(f.path)}">
         <span>${esc(f.name)}</span>
         <span class="badge ${f.errors ? 'err' : ''}">${f.errors ? f.errors + ' err' : f.lines + 'L'}</span>
       </div>`;
     html += `<div class="group-label">In this circuit</div>` + own.map(row).join('');
-    if (std.length) html += `<div class="group-label">Standard library</div>` + std.map(row).join('');
+
+    // Package sources are grouped by the package they came from, not lumped
+    // together as "standard library": since 0.8 an import resolves through one
+    // table, and which package a file arrived in is what a reader needs.
+    const byPkg = new Map<string, typeof own>();
+    for (const f of files) {
+      if (!f.package) continue;
+      const list = byPkg.get(f.package) ?? [];
+      list.push(f);
+      byPkg.set(f.package, list);
+    }
+    for (const name of [...byPkg.keys()].sort()) {
+      html += `<div class="group-label">${esc(name)}</div>` + byPkg.get(name)!.map(row).join('');
+    }
   }
 
   if (!html) {
@@ -985,12 +1134,12 @@ function treeHtml(nodes: TreeNode[], depth: number): string {
       const open = state.expanded.has(n.path);
       out.push(
         `<div class="tree-row dir" data-dir="${esc(n.path)}" style="padding-left:${pad}px">` +
-        `<span class="tw">${n.hasChildren ? (open ? '▾' : '▸') : '·'}</span>` +
+        `<span class="tw">${n.hasChildren ? ui(open ? 'chevron-down' : 'chevron-right', 11) : ''}</span>` +
         `<span class="tname">${esc(n.name)}</span></div>`);
       if (open) {
         const kids = state.children.get(n.path);
         if (kids) out.push(treeHtml(kids, depth + 1));
-        else out.push(`<div class="tree-row" style="padding-left:${pad + 22}px;color:var(--dim)">…</div>`);
+        else out.push(`<div class="tree-row" style="padding-left:${pad + 22}px;color:var(--text-faint)">loading…</div>`);
       }
       continue;
     }
@@ -1179,19 +1328,19 @@ function renderBlockInspector(el: HTMLElement) {
 
     <div class="insp-section">
       <div class="insp-title">Actions</div>
-      <div class="row" style="gap:6px">
-        ${b.navigable ? `<button id="b-enter" class="primary">Enter module</button>` : ''}
-        ${defOk ? `<button id="b-src">Edit model code</button>` : ''}
+      <div class="row" style="gap:8px">
+        ${b.navigable ? `<button id="b-enter" class="primary">${ui('log-in', 13)}Enter module</button>` : ''}
+        ${defOk ? `<button id="b-src">Edit model</button>` : ''}
       </div>
-      <div class="row" style="gap:6px; margin-top:6px">
-        <button id="b-rot" title="Rotate 90° (R)">⟳ ${b.rot}°</button>
-        <button id="b-fx" class="${b.flipX ? 'primary' : ''}" title="Mirror across the pin axis (H)">⇄</button>
-        <button id="b-fy" class="${b.flipY ? 'primary' : ''}" title="Reverse pin order (V)">⇅</button>
-        <button id="b-icon">Symbol</button>
+      <div class="row" style="gap:8px; margin-top:8px">
+        <button id="b-rot" title="Rotate 90° (R)">${ui('rotate-cw', 13)}${b.rot}°</button>
+        <button id="b-fx" class="${b.flipX ? 'primary' : ''}" title="Mirror across the pin axis (H)">${ui('flip-horizontal', 13)}</button>
+        <button id="b-fy" class="${b.flipY ? 'primary' : ''}" title="Reverse pin order (V)">${ui('flip-vertical', 13)}</button>
+        <button id="b-icon" title="Choose the schematic symbol">${ui('shapes', 13)}</button>
       </div>
-      <div class="row" style="gap:6px; margin-top:6px">
+      <div class="row" style="gap:8px; margin-top:8px">
         <button id="b-line">Go to line</button>
-        <button id="b-del">Delete</button>
+        <button id="b-del" class="danger">${ui('trash-2', 13)}Delete</button>
       </div>
     </div>`;
 
@@ -1517,6 +1666,9 @@ async function onDrop(payload: string, x: number, y: number) {
       typeName: p.name,
       alias: p.kind === 'module' ? (cfg.alias ?? '') : '',
       importPath: p.kind === 'module' ? (p.importPath ?? '') : '',
+      // Only consulted when no import is added: a local module reached through
+      // an import that already exists is still only visible behind it.
+      qualifier: p.kind === 'module' ? (p.qualifier ?? '') : '',
       instance: cfg.instance ?? '',
       static: cfg.static ?? '',
       logic: cfg.logic ?? '',
@@ -1566,7 +1718,7 @@ function confirmModal(title: string, hint: string): Promise<boolean> {
       <div class="hint">${esc(hint)}</div>
       <div class="actions">
         <button data-x="no">Cancel</button>
-        <button data-x="yes" class="primary">Delete</button>
+        <button data-x="yes" class="danger">Delete</button>
       </div>`);
     root.querySelector('[data-x="no"]')!.addEventListener('click', () => { close(); resolve(false); });
     root.querySelector('[data-x="yes"]')!.addEventListener('click', () => { close(); resolve(true); });
@@ -1596,14 +1748,20 @@ function insertModal(p: any, entry: PrimitiveDef | CatalogEntry, sh: SafeSheet):
     <div class="hint">
       ${isPrim ? esc(prim.desc) : esc(mod.desc || `${mod.domain} module`)}
       <br>Writes one statement into <b>${esc(sh.qualified)}</b>${
-        !isPrim && mod.importPath ? `, adding <code>import &lt;${esc(mod.importPath)}&gt;</code> if needed` : ''}.
+        !isPrim && mod.importPath ? `, adding <code>import &lt;${esc(mod.importPath)}&gt;</code> if needed` : ''}${
+        !isPrim && mod.qualifier ? `, as <code>${esc(mod.qualifier)}.${esc(mod.name)}</code>` : ''}.
     </div>
 
     ${!isPrim ? `
       <div class="row"><label>instance</label>
         <input id="m-inst" placeholder="auto" value=""/></div>
-      ${mod.importPath ? `<div class="row"><label>alias</label>
-        <input id="m-alias" value="${esc(mod.suggestAlias ?? '')}"/></div>` : ''}
+      ${mod.importPath ? `<div class="row"><label>import as</label>
+        <input id="m-alias" value="${esc(mod.suggestAlias ?? '')}"
+               placeholder="${esc(mod.qualifier ?? '')}"/></div>
+        <div class="hint" style="margin:2px 0 0">
+          An import binds one name for the whole directory; leave this empty to
+          use <code>${esc(mod.qualifier ?? '')}</code>.
+        </div>` : ''}
     ` : ''}
 
     ${params.length ? `<div class="insp-title" style="margin:12px 0 6px">Parameters &lt;…&gt;</div>
@@ -1713,31 +1871,125 @@ function pickIcon(b: Block) {
 function renderStatus(liveErrors?: string[]) {
   const el = document.getElementById('status')!;
   if (!state.project) {
-    el.innerHTML = `<span class="seg">No file open</span>`;
+    el.innerHTML = `<span class="seg"><span class="dot"></span>no circuit open</span>`;
     return;
   }
   const errs = liveErrors ?? state.project.errors ?? [];
-  const std = state.project.stdlibRoot;
+  const pkgs = state.project.packages;
+  const roots = Object.keys(pkgs?.roots ?? {}).length;
+  const sh = state.sheet;
 
+  // Every count is a number in the code family, tabular, paired with its noun.
   el.innerHTML =
     `<span class="seg ${errs.length ? 'err' : 'ok'}" id="st-err">` +
-    (errs.length ? `● ${errs.length} problem${errs.length === 1 ? '' : 's'}` : '● no problems') +
+    `<span class="dot ${errs.length ? 'err' : 'ok'}"></span>` +
+    (errs.length ? `<span class="num">${errs.length}</span> problem${errs.length === 1 ? '' : 's'}`
+                 : 'no problems') +
     `</span>` +
-    `<span class="seg">${esc(state.sheet?.qualified ?? '')}</span>` +
-    (state.dirty ? `<span class="seg" style="color:var(--state)">unsaved changes</span>` : '') +
+    (sh ? `<span class="seg">${esc(sh.qualified)}</span>` +
+          `<span class="seg">blocks <span class="num">${sh.blocks.length}</span></span>` +
+          `<span class="seg">nets <span class="num">${sh.nets.length}</span></span>` +
+          `<span class="seg">signals <span class="num">${sh.signals.length}</span></span>`
+        : '') +
+    (state.dirty ? `<span class="seg warn">unsaved changes</span>` : '') +
     `<span class="spacer" style="flex:1"></span>` +
-    `<span class="seg" id="st-std" title="Click to change">stdlib: ${esc(std ? shorten(std) : 'not found — click to set')}</span>`;
+    `<span class="seg" id="st-pkg" title="Click to re-read the lockfiles">packages ` +
+    (pkgs?.stdlibInstalled
+      ? `<span class="num">${roots}</span>`
+      : `<span class="warn">no stdlib — run setup</span>`) + `</span>`;
 
   document.getElementById('st-err')?.addEventListener('click', () => {
     if (errs.length) toast(errs.join('\n'), 'err', 9000);
   });
-  document.getElementById('st-std')?.addEventListener('click', async () => {
+  // Clicking opens the package table rather than a directory picker: since 0.8
+  // there is nothing to pick. Where the packages are is the lockfile's answer,
+  // and it changes when `hover hpm install` runs — here or in a terminal.
+  document.getElementById('st-pkg')?.addEventListener('click', () => {
+    if (!pkgs?.stdlibInstalled) { openSettings(); return; }
+    openPackages();
+  });
+}
+
+/**
+ * The package table, and the commands that change it.
+ *
+ * Deliberately a thin front end for `hover hpm`: it is the same binary and the
+ * same lockfiles either way, so anything hoverdeck resolved differently from
+ * the CLI would be a bug rather than a feature. What the window adds is seeing
+ * which roots an import actually resolves through, which the CLI cannot show
+ * for the file you happen to have open.
+ */
+async function openPackages() {
+  const pkgs = (await API.GetPackages()) as unknown as Packages;
+  const roots = pkgs?.roots ?? {};
+  const names = Object.keys(roots).sort();
+
+  const { root, close } = modal(`
+    <h3>Packages</h3>
+    <div class="hint">
+      What <code>import &lt;…&gt;</code> resolves through for the open file. Inside a project
+      that is its <code>hover.lock</code> plus the machine's standard library; outside one,
+      everything installed in <code>~/.hover</code>.
+    </div>
+
+    ${pkgs?.note ? `<div class="err-item">${esc(pkgs.note)}</div>` : ''}
+
+    <div class="insp-title" style="margin:12px 0 6px">Roots <span class="num">${names.length}</span></div>
+    <div class="pkg-list">
+      ${names.length
+        ? names.map((n) => `<div class="file-item"><span>${esc(n)}</span>
+            <span class="badge" title="${esc(roots[n])}">${esc(shorten(roots[n]))}</span></div>`).join('')
+        : `<div class="empty-note" style="padding:0 2px">Nothing installed.</div>`}
+    </div>
+    ${pkgs?.bundled ? `<div class="hint" style="margin:6px 0 0">
+      Falling back to the copy bundled beside the compiler: <code>${esc(shorten(pkgs.bundled))}</code>.
+      An installed package of the same name wins over it.
+    </div>` : ''}
+
+    <div class="insp-title" style="margin:14px 0 6px">hpm</div>
+    <div class="row">
+      <label>install</label>
+      <input id="p-name" placeholder="package name"/>
+      <button id="p-install" class="primary">Install</button>
+    </div>
+    <div class="row">
+      <label></label>
+      <button id="p-list">List</button>
+      <button id="p-update">Update</button>
+      <button id="p-verify">Verify</button>
+    </div>
+    <div class="hint" style="margin:6px 0 0">
+      Runs in the project folder, writing its <code>hover.toml</code> and
+      <code>hover.lock</code>. Output goes to the console.
+    </div>
+
+    <div class="actions">
+      <button data-x="no">Close</button>
+      <button data-x="refresh" class="primary">Re-read lockfiles</button>
+    </div>`);
+
+  const hpm = async (args: string[]) => { close(); await runHPM(args); };
+  const name = root.querySelector('#p-name') as HTMLInputElement;
+
+  root.querySelector('#p-install')!.addEventListener('click', () => {
+    const v = name.value.trim();
+    if (!v) { toast('Name a package to install', 'err'); return; }
+    void hpm(['install', v]);
+  });
+  root.querySelector('#p-list')!.addEventListener('click', () => void hpm(['list']));
+  root.querySelector('#p-update')!.addEventListener('click', () => void hpm(['update']));
+  root.querySelector('#p-verify')!.addEventListener('click', () => void hpm(['verify']));
+
+  root.querySelector('[data-x="no"]')!.addEventListener('click', close);
+  root.querySelector('[data-x="refresh"]')!.addEventListener('click', async () => {
+    close();
     try {
-      const info = (await API.PickStdlibRoot()) as unknown as ProjectInfo;
-      state.project = info;
+      const info = (await API.RefreshPackages()) as unknown as ProjectInfo;
+      if (info?.open) state.project = info;
       await loadCatalog();
       await refreshSheet();
       renderAll();
+      toast(`${Object.keys(info?.packages?.roots ?? {}).length} package roots`, 'ok');
     } catch (e) { showErr(e); }
   });
 }
@@ -1790,12 +2042,15 @@ function showWelcome() {
   const c = document.getElementById('center')!;
   const overlay = document.createElement('div');
   overlay.className = 'canvas-empty';
+  // The empty canvas is the app's one hero, so it gets the one drift: the
+  // saucer never sits still. Reduced motion stops it.
   overlay.innerHTML = `
+    <img class="hv-drift" src="${logoDisc}" alt="" width="132" height="132"/>
     <h2>No circuit open</h2>
     <p>Open a <code>.hvr</code> file to see its modules as blocks and its wires as
        connections. hoverdeck reads and writes the same source the compiler does —
        it visualises your code, it doesn't replace it.</p>
-    <button class="primary" id="w-open">Open a .hvr file…</button>`;
+    <button class="primary" id="w-open">${ui('folder-open', 15)}Open a .hvr file</button>`;
   c.appendChild(overlay);
   document.getElementById('w-open')!.addEventListener('click', async () => {
     await openProject();

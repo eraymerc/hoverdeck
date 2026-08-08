@@ -97,11 +97,11 @@ export class Canvas {
         <svg class="canvas">
           <defs>
             <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse">
-              <circle cx="1" cy="1" r="1" fill="#1a2030"/>
+              <circle cx="1" cy="1" r="1" fill="var(--canvas-grid)"/>
             </pattern>
             <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4"
                     markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-              <path d="M0 1 L7 4 L0 7 z" fill="var(--state)"/>
+              <path d="M0 1 L7 4 L0 7 z" fill="var(--signal)"/>
             </marker>
           </defs>
           <rect class="grid-bg" width="100%" height="100%" fill="url(#grid)"/>
@@ -640,7 +640,7 @@ export class Canvas {
       }).join('');
 
       const unresolved = b.kind === 'instance' && b.def && !b.def.found;
-      const boxStroke = unresolved ? ' style="stroke:var(--danger)"' : '';
+      const boxStroke = unresolved ? ' style="stroke:var(--color-red)"' : '';
 
       out.push(
         `<g class="block" data-id="${esc(b.id)}" transform="translate(0 0)">` +

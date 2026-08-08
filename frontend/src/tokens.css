@@ -1,0 +1,247 @@
+/* Hover design tokens.
+ *
+ * Copied verbatim from the Hover Design System (tokens/colors.css,
+ * typography.css, spacing.css, effects.css). Do not edit values here — edit
+ * them in the design system and re-copy, so hoverdeck stays in step with
+ * hover.dev and the docs site.
+ *
+ * Two themes. The brand is light-first, but a schematic editor is stared at
+ * for hours, so dark is the default here. It is not a second palette: it is
+ * the same four colours with the surface roles swapped onto the design
+ * system's own on-navy ramp — navy-ink grounds, cream keylines, the sanctioned
+ * `rgba(242,234,210,.2)` hairline, yellow still the single accent. Every rule
+ * the brand states about corners, keylines, shadows, type and domain colour
+ * holds identically in both.
+ *
+ * Everything in this first block is theme-invariant.
+ */
+
+:root {
+  /* ── Base ramp ──────────────────────────────────────────────────────── */
+  --color-black: #000000;
+  --color-navy-ink: #0d1745;
+  --color-navy: #16256b;
+  --color-navy-mid: #1b2f8c;
+  --color-blue: #22409c;
+  --color-blue-bright: #2c50c4;
+  --color-cream: #f2ead2;
+  --color-paper: #ecebe6;
+  --color-white: #ffffff;
+  --color-yellow: #ffd21e;
+  --color-red: #e8202a;
+  --color-grey-70: #55534d;
+  --color-grey-50: #77756e;
+  --color-rule: #d9d6cc;
+  --color-green: #1f7a4d;
+  /* Extension: the design system's green is drawn for light grounds and goes
+     muddy on navy ink. The surfaces that are inverse in *both* themes — the
+     console, the code frame, the status bar — use this lifted version. */
+  --color-green-bright: #3fbf7f;
+
+  /* ── Surfaces that never flip ───────────────────────────────────────── */
+  /* The canvas, the code frame and the run/status bars are inverse in both
+     themes: they hold code, traces and telemetry, which the brand always sets
+     on navy ink. */
+  --surface-inverse: var(--color-navy-ink);
+  --surface-inverse-raised: var(--color-navy);
+  --surface-accent: var(--color-yellow);
+  --surface-code: var(--color-navy-ink);
+  --text-on-inverse: var(--color-cream);
+  --text-on-inverse-muted: #9aa3c4;
+  --text-accent: var(--color-red);
+  --line-key: var(--color-black);
+  --line-on-inverse: var(--color-cream);
+
+  /* ── Status ─────────────────────────────────────────────────────────── */
+  --status-error: var(--color-red);
+  --status-warn: var(--color-yellow);
+  --status-info: var(--color-blue);
+  /* --status-ok is theme-dependent; see the theme blocks below. */
+
+  /* ── Product semantics ──────────────────────────────────────────────── */
+  --domain-logic: var(--color-yellow);        /* MCU / discrete-time side */
+  --domain-physics: var(--color-blue-bright); /* continuous-time plant side */
+  --domain-boundary: var(--color-red);        /* the co-simulation seam */
+
+  /* ── Type ───────────────────────────────────────────────────────────── */
+  --font-display: 'Archivo Black', 'Arial Black', sans-serif;
+  --font-mono: 'Space Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+  --font-body: var(--font-mono);
+  --font-code: var(--font-mono);
+
+  --text-2xs: 10px;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 14px;
+  --text-md: 16px;
+  --text-lg: 20px;
+  --text-xl: 26px;
+  --text-2xl: 34px;
+
+  --leading-tight: 1;
+  --leading-snug: 1.2;
+  --leading-body: 1.62;
+  --leading-code: 1.5;
+
+  --tracking-display: -0.01em;
+  --tracking-body: 0;
+  --tracking-label: 0.14em;
+  --tracking-eyebrow: 0.18em;
+  --tracking-arc: 0.22em;
+
+  --skew-display: skewX(-9deg);
+
+  --weight-body: 400;
+  --weight-strong: 700;
+
+  /* ── Spacing ────────────────────────────────────────────────────────── */
+  --space-1: 2px;
+  --space-2: 4px;
+  --space-3: 6px;
+  --space-4: 8px;
+  --space-5: 10px;
+  --space-6: 12px;
+  --space-7: 14px;
+  --space-8: 16px;
+  --space-9: 18px;
+  --space-10: 22px;
+  --space-11: 26px;
+  --space-12: 32px;
+  --space-13: 40px;
+
+  --gutter-card: 26px;
+  --stack-tight: 14px;
+  --stack: 24px;
+
+  /* ── Effects ────────────────────────────────────────────────────────── */
+  --radius-none: 0;
+  --radius-pill: 999px;
+
+  --border-hair: 1px solid var(--line-hair);
+  --border-strong: 2px solid var(--line-strong);
+  --border-key: 3px solid var(--line-key);
+  --border-inverse: 2px solid var(--line-on-inverse);
+
+  --shadow-hard-xs: 2px 2px 0 var(--color-black);
+  --shadow-hard-sm: 3px 3px 0 var(--color-black);
+  --shadow-hard: 5px 5px 0 var(--color-black);
+  --shadow-hard-lg: 8px 8px 0 var(--color-black);
+  --shadow-overlay: 0 24px 64px rgba(13, 23, 69, 0.34);
+  --scrim: rgba(13, 23, 69, 0.62);
+
+  --dur-instant: 80ms;
+  --dur-fast: 120ms;
+  --dur: 180ms;
+  --dur-drift: 5200ms;
+  --ease-snap: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  --press-offset: 2px;
+
+  --focus-ring: 3px solid var(--color-yellow);
+  --focus-offset: 2px;
+
+  /* ── hoverdeck extensions ───────────────────────────────────────────── */
+  /* The on-navy hairline, for the surfaces that stay inverse in both themes. */
+  --canvas-hair: rgba(242, 234, 210, 0.2);
+
+  /* The schematic canvas is theme-dependent — see the theme blocks. It is the
+     document you are editing, not a readout, so it follows the chrome rather
+     than staying on navy like the console, the code frame and the scope. */
+
+  /* Circuit domains map onto the brand's two clocks: electrical/continuous
+     nets are the physics side, logic signals are the discrete side, and the
+     boundary between them is the seam. */
+  /* --dom-structural is theme-dependent; see the theme blocks below. */
+  --dom-analog: var(--domain-physics);
+  --dom-digital: var(--domain-logic);
+  --dom-primitive: var(--text-on-inverse-muted);
+
+  /* Logic yellow is a fill colour on light grounds, never a hairline, so on
+     paper the discrete side speaks in the brand's ochre (--text-link-hover,
+     a darkened yellow): it keeps its meaning and stays legible. */
+  --wire-hot: var(--canvas-accent);
+  --signal: var(--canvas-accent);
+  --seam: var(--domain-boundary);
+}
+
+/* ── Dark (default) ───────────────────────────────────────────────────────
+ *
+ * The chrome joins the canvas on navy ink. Panels are navy-ink cards bounded
+ * by 2px cream keylines (the design system's `--border-inverse`), separated
+ * inside by the on-navy hairline. The page ground behind the regions is black,
+ * so every splitter reads as the brand's strong frame rather than as a gutter.
+ */
+:root,
+:root[data-theme="dark"] {
+  --surface-page: var(--color-black);
+  --surface-card: var(--color-navy-ink);
+  --surface-sunk: var(--color-navy);
+
+  --text-heading: var(--color-cream);
+  --text-body: var(--color-cream);
+  --text-muted: #9aa3c4;    /* the design system's on-navy muted */
+  --text-faint: #7683a8;    /* one step dimmer again — extension */
+  --text-link: var(--color-yellow);
+  --text-link-hover: #ffe98a;
+
+  --line-hair: rgba(242, 234, 210, 0.2);  /* the sanctioned on-navy hairline */
+  --line-strong: var(--color-cream);
+
+  /* Controls and frames. On navy the keyline is cream, which is exactly the
+     design system's `inverse` Button variant. */
+  --control-fg: var(--color-cream);
+  --field-border: #6f7ba3;
+  --frame: var(--color-cream);
+  --dom-structural: var(--color-cream);
+  --status-ok: var(--color-green-bright);
+
+  /* Canvas: a navy-ink sheet, navy block cards, cream keylines. */
+  --canvas-ground: var(--color-navy-ink);
+  --canvas-grid: #1e2a5c;            /* navy-ink lifted just enough to read */
+  --canvas-block: var(--color-navy);
+  --canvas-block-hi: var(--color-navy-mid);
+  --canvas-panel: var(--color-navy);
+  --canvas-accent: var(--color-yellow);
+  --wire: #7f8cbb;                   /* cream-to-navy midpoint, on navy */
+
+  color-scheme: dark;
+}
+
+/* ── Light ────────────────────────────────────────────────────────────────
+ *
+ * The brand-native ground: paper page, white cards, 2px navy keylines, warm
+ * hairlines. This is what the design system's Studio kit prescribes.
+ */
+:root[data-theme="light"] {
+  --surface-page: var(--color-paper);
+  --surface-card: var(--color-white);
+  --surface-sunk: var(--color-cream);
+
+  --text-heading: var(--color-navy);
+  --text-body: var(--color-navy-ink);
+  --text-muted: var(--color-grey-70);
+  --text-faint: var(--color-grey-50);
+  --text-link: var(--color-navy);
+  --text-link-hover: #b78700;
+
+  --line-hair: var(--color-rule);
+  --line-strong: var(--color-navy);
+
+  --control-fg: var(--color-navy);
+  --field-border: var(--color-grey-50);
+  --frame: var(--color-black);
+  --dom-structural: var(--color-navy);
+  --status-ok: var(--color-green);
+
+  /* Canvas: a paper sheet with white block cards and navy keylines — the
+     design system's page/card/sunk trio, used as a drawing surface. */
+  --canvas-ground: var(--color-paper);
+  --canvas-grid: var(--color-rule);
+  --canvas-block: var(--color-white);
+  --canvas-block-hi: var(--color-cream);
+  --canvas-panel: var(--color-white);
+  --canvas-accent: #b78700;          /* the brand ochre — yellow, on paper */
+  --wire: var(--color-grey-70);      /* warm neutral, never blue-grey */
+
+  color-scheme: light;
+}

@@ -30,6 +30,10 @@ export function GetCatalog() {
   return window['go']['main']['App']['GetCatalog']();
 }
 
+export function GetPackages() {
+  return window['go']['main']['App']['GetPackages']();
+}
+
 export function GetSettings() {
   return window['go']['main']['App']['GetSettings']();
 }
@@ -86,10 +90,6 @@ export function PickProject() {
   return window['go']['main']['App']['PickProject']();
 }
 
-export function PickStdlibRoot() {
-  return window['go']['main']['App']['PickStdlibRoot']();
-}
-
 export function PickWorkDir() {
   return window['go']['main']['App']['PickWorkDir']();
 }
@@ -138,6 +138,10 @@ export function ReadFile(arg1) {
   return window['go']['main']['App']['ReadFile'](arg1);
 }
 
+export function RefreshPackages() {
+  return window['go']['main']['App']['RefreshPackages']();
+}
+
 export function Reload() {
   return window['go']['main']['App']['Reload']();
 }
@@ -150,12 +154,20 @@ export function Run() {
   return window['go']['main']['App']['Run']();
 }
 
+export function RunHPM(arg1) {
+  return window['go']['main']['App']['RunHPM'](arg1);
+}
+
+export function RunSetup() {
+  return window['go']['main']['App']['RunSetup']();
+}
+
 export function SaveFile(arg1, arg2) {
   return window['go']['main']['App']['SaveFile'](arg1, arg2);
 }
 
-export function SaveSettings(arg1, arg2, arg3) {
-  return window['go']['main']['App']['SaveSettings'](arg1, arg2, arg3);
+export function SaveSettings(arg1, arg2) {
+  return window['go']['main']['App']['SaveSettings'](arg1, arg2);
 }
 
 export function SetBlockIcon(arg1, arg2, arg3) {
@@ -196,10 +208,6 @@ export function SetSignalPosition(arg1, arg2, arg3, arg4) {
 
 export function SetSpanText(arg1, arg2, arg3) {
   return window['go']['main']['App']['SetSpanText'](arg1, arg2, arg3);
-}
-
-export function SetStdlibRoot(arg1) {
-  return window['go']['main']['App']['SetStdlibRoot'](arg1);
 }
 
 export function StopRun() {
