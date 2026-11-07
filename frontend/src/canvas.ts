@@ -10,15 +10,25 @@
  * Ground is drawn as a local terminal at each pin instead of a routed net,
  * the way a real schematic does it: gnd touches nearly every block, so
  * routing it would bury the diagram in lines carrying no information.
+ *
+ * A block is drawn one of two ways. When its symbol fits its ports (the
+ * backend decides, see hvr.FitSymbol) it is the schematic symbol itself, with
+ * wires meeting the ends of its leads. Otherwise it is a box with the pins
+ * spread along two edges and the symbol as a small header glyph — every user
+ * module without a symbol of its own looks like that.
  */
 
-import { iconSvg, groundSymbol } from './icons';
-import type { SafeSheet as Sheet, SafeBlock as Block, Signal } from './types';
+import { iconSvg, groundSymbol, symbolOf, symbolBody } from './icons';
+import type { SafeSheet as Sheet, SafeBlock as Block, Signal, SymbolDef } from './types';
 
 const BLOCK_W = 152;
 const BLOCK_MIN_H = 76;
 const PIN_SPACING = 20;
-const PIN_STUB = 18;
+// One symbol grid step — the pin pitch of every symbol in
+// internal/hvr/symbols. The background dots are drawn at it, so pins land on
+// visible dots, and a stub this long from a pin on the grid ends on it.
+const GRID = 16;
+const PIN_STUB = GRID;
 const HEADER_H = 44;
 
 export interface CanvasHandlers {
@@ -35,12 +45,17 @@ export interface CanvasHandlers {
 
 interface Geom {
   block: Block;
+  /** Bounding box in world space — the box, or the symbol as oriented. */
   x: number;
   y: number;
   w: number;
   h: number;
   pins: PinGeom[];
+  /** The symbol this block is drawn as, or null for a box. */
+  sym: SymbolDef | null;
 }
+
+type Dir = PinGeom['dir'];
 
 interface PinGeom {
   index: number;
@@ -61,13 +76,43 @@ function legKeyOf(p: PinGeom): string {
 }
 
 /** Unit vector a pin's stub leaves along. */
-function stubVec(dir: PinGeom['dir']): [number, number] {
+function stubVec(dir: Dir): [number, number] {
   switch (dir) {
     case 'left': return [-1, 0];
     case 'right': return [1, 0];
     case 'up': return [0, -1];
     default: return [0, 1];
   }
+}
+
+function vecDir(x: number, y: number): Dir {
+  if (x < 0) return 'left';
+  if (x > 0) return 'right';
+  return y < 0 ? 'up' : 'down';
+}
+
+/**
+ * A block's orientation as a map from symbol coordinates to offsets from the
+ * block's position: mirror first, in the symbol's own axes, then rotate —
+ * the same order as the SVG transform it also returns, so the pins computed
+ * here land exactly on the leads drawn there. Rotations are quarter turns, so
+ * the matrix is integer and a pin on the grid stays on it.
+ */
+function orientation(b: Block) {
+  const q = Math.round((((b.rot % 360) + 360) % 360) / 90) % 4;
+  const c = [1, 0, -1, 0][q];
+  const s = [0, 1, 0, -1][q];
+  const sx = b.flipX ? -1 : 1;
+  const sy = b.flipY ? -1 : 1;
+  const apply = (x: number, y: number): [number, number] => {
+    const fx = sx * x, fy = sy * y;
+    return [c * fx - s * fy + 0, s * fx + c * fy + 0]; // + 0 folds -0 away
+  };
+  return {
+    apply,
+    dir: (d: Dir): Dir => vecDir(...apply(...stubVec(d))),
+    transform: `rotate(${q * 90}) scale(${sx} ${sy})`,
+  };
 }
 
 export class Canvas {
@@ -96,7 +141,7 @@ export class Canvas {
       <div class="canvas-wrap">
         <svg class="canvas">
           <defs>
-            <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse">
+            <pattern id="grid" width="${GRID}" height="${GRID}" patternUnits="userSpaceOnUse">
               <circle cx="1" cy="1" r="1" fill="var(--canvas-grid)"/>
             </pattern>
             <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4"
@@ -140,10 +185,10 @@ export class Canvas {
     this.root.setAttribute('transform', `translate(${this.tx} ${this.ty}) scale(${this.scale})`);
     // Keep the dot grid locked to world space so panning feels physical.
     const bg = this.svg.querySelector('.grid-bg') as SVGRectElement;
-    bg?.setAttribute('transform', `translate(${this.tx % (24 * this.scale)} ${this.ty % (24 * this.scale)})`);
+    bg?.setAttribute('transform', `translate(${this.tx % (GRID * this.scale)} ${this.ty % (GRID * this.scale)})`);
     const pat = this.svg.querySelector('#grid') as SVGPatternElement;
-    pat?.setAttribute('width', String(24 * this.scale));
-    pat?.setAttribute('height', String(24 * this.scale));
+    pat?.setAttribute('width', String(GRID * this.scale));
+    pat?.setAttribute('height', String(GRID * this.scale));
   }
 
   private zoomBy(f: number) {
@@ -307,60 +352,7 @@ export class Canvas {
     this.chipGeoms.clear();
 
     for (const b of sheet.blocks) {
-      const n = b.pins.length;
-
-      // Ports split half to one side, half to the other. For a 3-pin BJT that
-      // puts base on the first side with collector/emitter opposite, and for a
-      // 5-pin op-amp the two inputs on one side and rails + output on the
-      // other, which is how both are conventionally drawn.
-      let aCount = Math.floor(n / 2);
-      let bCount = n - aCount;
-      const rows = Math.max(aCount, bCount, 1);
-
-      // A 90/270 rotation puts the pins on the top and bottom edges, so the
-      // box grows sideways instead of downwards.
-      const rot = ((b.rot % 360) + 360) % 360;
-      const vertical = rot === 90 || rot === 270;
-
-      const w = vertical ? Math.max(BLOCK_W, rows * PIN_SPACING + 60) : BLOCK_W;
-      const h = vertical ? BLOCK_MIN_H : Math.max(BLOCK_MIN_H, HEADER_H + rows * PIN_SPACING + 12);
-
-      const g: Geom = { block: b, x: b.x, y: b.y, w, h, pins: [] };
-
-      // Which physical edge each group lands on, before mirroring.
-      let sideA: PinGeom['dir'], sideB: PinGeom['dir'];
-      switch (rot) {
-        case 90:  sideA = 'up';    sideB = 'down';  break;
-        case 180: sideA = 'right'; sideB = 'left';  break;
-        case 270: sideA = 'down';  sideB = 'up';    break;
-        default:  sideA = 'left';  sideB = 'right'; break;
-      }
-      if (b.flipX) {
-        [sideA, sideB] = [sideB, sideA];
-        [aCount, bCount] = [bCount, aCount];
-      }
-
-      b.pins.forEach((p, i) => {
-        const inA = i < aCount;
-        const dir = inA ? sideA : sideB;
-        const count = inA ? aCount : bCount;
-        let slot = inA ? i : i - aCount;
-        if (b.flipY) slot = count - 1 - slot; // mirror the order along the edge
-
-        const span = (count - 1) * PIN_SPACING;
-        let x: number, y: number;
-
-        if (dir === 'left' || dir === 'right') {
-          y = g.y + HEADER_H + (h - HEADER_H - 12 - span) / 2 + slot * PIN_SPACING;
-          x = dir === 'left' ? g.x : g.x + g.w;
-        } else {
-          x = g.x + (w - span) / 2 + slot * PIN_SPACING;
-          y = dir === 'up' ? g.y : g.y + g.h;
-        }
-        g.pins.push({ index: p.index, name: p.name, net: p.net, x, y, dir, blockId: b.id, ref: p.ref });
-      });
-
-      this.geoms.set(b.id, g);
+      this.geoms.set(b.id, this.symbolGeom(b) ?? this.boxGeom(b));
     }
 
     // Signal chips carry their own saved position, exactly like blocks; the
@@ -369,6 +361,101 @@ export class Canvas {
       const w = Math.max(64, s.name.length * 7 + 44);
       this.chipGeoms.set(s.name, { x: s.x, y: s.y, w, h: 26, sig: s });
     }
+  }
+
+  /**
+   * Geometry for a block drawn as its symbol: the block's position is the
+   * symbol's origin, and each pin sits where the symbol file put it, turned
+   * with the block. Null when the block has no fitting symbol.
+   */
+  private symbolGeom(b: Block): Geom | null {
+    const sym = b.symPins ? symbolOf(b.icon) : undefined;
+    const spins = sym?.pins ?? [];
+    if (!sym || !b.symPins || b.symPins.length !== b.pins.length ||
+        b.symPins.some((j) => !spins[j])) {
+      return null;
+    }
+    const o = orientation(b);
+
+    const [vx, vy, vw, vh] = sym.viewBox;
+    const corners = [o.apply(vx, vy), o.apply(vx + vw, vy), o.apply(vx, vy + vh), o.apply(vx + vw, vy + vh)];
+    const xs = corners.map((p) => p[0]);
+    const ys = corners.map((p) => p[1]);
+    const minX = Math.min(...xs), minY = Math.min(...ys);
+
+    const g: Geom = {
+      block: b, sym, pins: [],
+      x: b.x + minX, y: b.y + minY,
+      w: Math.max(...xs) - minX, h: Math.max(...ys) - minY,
+    };
+    b.pins.forEach((p, i) => {
+      const sp = spins[b.symPins![i]];
+      const [dx, dy] = o.apply(sp.x, sp.y);
+      g.pins.push({
+        index: p.index, name: p.name, net: p.net,
+        x: b.x + dx, y: b.y + dy, dir: o.dir(sp.dir),
+        blockId: b.id, ref: p.ref,
+      });
+    });
+    return g;
+  }
+
+  /** Geometry for a block drawn as a box: pins split across two edges. */
+  private boxGeom(b: Block): Geom {
+    const n = b.pins.length;
+
+    // Ports split half to one side, half to the other. For a 3-pin BJT that
+    // puts base on the first side with collector/emitter opposite, and for a
+    // 5-pin op-amp the two inputs on one side and rails + output on the
+    // other, which is how both are conventionally drawn.
+    let aCount = Math.floor(n / 2);
+    let bCount = n - aCount;
+    const rows = Math.max(aCount, bCount, 1);
+
+    // A 90/270 rotation puts the pins on the top and bottom edges, so the
+    // box grows sideways instead of downwards.
+    const rot = ((b.rot % 360) + 360) % 360;
+    const vertical = rot === 90 || rot === 270;
+
+    const w = vertical ? Math.max(BLOCK_W, rows * PIN_SPACING + 60) : BLOCK_W;
+    const h = vertical ? BLOCK_MIN_H : Math.max(BLOCK_MIN_H, HEADER_H + rows * PIN_SPACING + 12);
+
+    const g: Geom = { block: b, x: b.x, y: b.y, w, h, pins: [], sym: null };
+
+    // Which physical edge each group lands on, before mirroring.
+    let sideA: PinGeom['dir'], sideB: PinGeom['dir'];
+    switch (rot) {
+      case 90:  sideA = 'up';    sideB = 'down';  break;
+      case 180: sideA = 'right'; sideB = 'left';  break;
+      case 270: sideA = 'down';  sideB = 'up';    break;
+      default:  sideA = 'left';  sideB = 'right'; break;
+    }
+    if (b.flipX) {
+      [sideA, sideB] = [sideB, sideA];
+      [aCount, bCount] = [bCount, aCount];
+    }
+
+    b.pins.forEach((p, i) => {
+      const inA = i < aCount;
+      const dir = inA ? sideA : sideB;
+      const count = inA ? aCount : bCount;
+      let slot = inA ? i : i - aCount;
+      if (b.flipY) slot = count - 1 - slot; // mirror the order along the edge
+
+      const span = (count - 1) * PIN_SPACING;
+      let x: number, y: number;
+
+      if (dir === 'left' || dir === 'right') {
+        y = g.y + HEADER_H + (h - HEADER_H - 12 - span) / 2 + slot * PIN_SPACING;
+        x = dir === 'left' ? g.x : g.x + g.w;
+      } else {
+        x = g.x + (w - span) / 2 + slot * PIN_SPACING;
+        y = dir === 'up' ? g.y : g.y + g.h;
+      }
+      g.pins.push({ index: p.index, name: p.name, net: p.net, x, y, dir, blockId: b.id, ref: p.ref });
+    });
+
+    return g;
   }
 
   // ── Render ────────────────────────────────────────────────────────────
@@ -531,7 +618,9 @@ export class Canvas {
   private autoTrunkX(name: string): number {
     const pins = this.pinsOfNet(name);
     if (!pins.length) return 0;
-    const stubs = pins.map((p) => p.x + (p.dir === 'left' ? -PIN_STUB : PIN_STUB));
+    // Must match the channel renderNets computes, or a trunk jumps sideways
+    // the moment it is grabbed: an up/down pin's stub ends at its own x.
+    const stubs = pins.map((p) => p.x + stubVec(p.dir)[0] * PIN_STUB);
     return Math.round(stubs.reduce((a, b) => a + b, 0) / stubs.length);
   }
 
@@ -601,6 +690,10 @@ export class Canvas {
     for (const b of sheet.blocks) {
       const g = this.geoms.get(b.id);
       if (!g) continue;
+      if (g.sym) {
+        out.push(this.renderSymbolBlock(b, g, g.sym));
+        continue;
+      }
 
       const accent = domainColor(b.domain);
       const params = b.params.map((p) => p.text).join(', ');
@@ -662,6 +755,67 @@ export class Canvas {
       );
     }
     return out.join('');
+  }
+
+  /**
+   * A block drawn as its schematic symbol. The drawing is rotated and
+   * mirrored with the block; its labels are not, and go on whichever side of
+   * it no wire leaves from, so they never sit on a lead.
+   */
+  private renderSymbolBlock(b: Block, g: Geom, sym: SymbolDef): string {
+    const o = orientation(b);
+    const connected = new Set((b.symPins ?? []).map((j) => sym.pins![j].name));
+    const pad = 4;
+
+    const pinMarkup = g.pins.map((p) => {
+      if (p.ref) {
+        return `<circle class="pin-dot pin-ref" cx="${p.x}" cy="${p.y}" r="3"><title>${esc(p.name)} senses ${esc(p.net)}</title></circle>`;
+      }
+      return (
+        `<g data-net="${esc(p.net)}">` +
+        `<circle class="pin-dot sym-pin" data-net="${esc(p.net)}" cx="${p.x}" cy="${p.y}" r="2.6"/>` +
+        `<rect class="pin-hit" data-pin="${p.index}" data-block="${esc(b.id)}" data-net="${esc(p.net)}" ` +
+        `x="${p.x - 7}" y="${p.y - 7}" width="14" height="14"><title>${esc(p.name)} — ${esc(p.net)}</title></rect>` +
+        `</g>`
+      );
+    }).join('');
+
+    return (
+      `<g class="block sym-block" data-id="${esc(b.id)}" transform="translate(0 0)">` +
+      `<rect class="sym-hit" x="${g.x - pad}" y="${g.y - pad}" width="${g.w + pad * 2}" height="${g.h + pad * 2}"/>` +
+      `<g class="sym-draw" transform="translate(${b.x} ${b.y}) ${o.transform}">` +
+      `<g class="sym">${symbolBody(sym, connected)}</g></g>` +
+      this.symbolLabels(b, g) +
+      (b.navigable
+        ? `<circle class="state-badge" cx="${g.x + g.w}" cy="${g.y}" r="6"/>` +
+          `<text class="state-badge-text" x="${g.x + g.w}" y="${g.y + 3}" text-anchor="middle">↧</text>`
+        : '') +
+      pinMarkup +
+      `</g>`
+    );
+  }
+
+  /** Reference, type and value beside a symbol, like a schematic's fields. */
+  private symbolLabels(b: Block, g: Geom): string {
+    const lines: { text: string; cls: string }[] = [{ text: trunc(b.label, 14), cls: 'block-label' }];
+    const params = b.params.map((p) => p.text).join(', ');
+    if (b.kind === 'instance') lines.push({ text: trunc(b.typeName, 16), cls: 'block-type' });
+    if (params) lines.push({ text: trunc(params, 22), cls: 'block-param' });
+
+    const used = new Set(g.pins.map((p) => p.dir));
+    const side = (['right', 'left', 'down', 'up'] as Dir[]).find((d) => !used.has(d)) ?? 'down';
+    const LINE = 12;
+    const cx = g.x + g.w / 2, cy = g.y + g.h / 2;
+    let x: number, y0: number, anchor: string;
+    switch (side) {
+      case 'right': x = g.x + g.w + 6; anchor = 'start'; y0 = cy - ((lines.length - 1) * LINE) / 2 + 4; break;
+      case 'left': x = g.x - 6; anchor = 'end'; y0 = cy - ((lines.length - 1) * LINE) / 2 + 4; break;
+      case 'up': x = cx; anchor = 'middle'; y0 = g.y - 6 - (lines.length - 1) * LINE; break;
+      default: x = cx; anchor = 'middle'; y0 = g.y + g.h + 14; break;
+    }
+    return lines.map((l, i) =>
+      `<text class="${l.cls} sym-label" x="${x}" y="${y0 + i * LINE}" text-anchor="${anchor}">${esc(l.text)}</text>`,
+    ).join('');
   }
 
   // ── Events on rendered nodes ──────────────────────────────────────────

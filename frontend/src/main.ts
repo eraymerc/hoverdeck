@@ -4,7 +4,7 @@ import * as API from '../wailsjs/go/main/App';
 import { EventsOn } from '../wailsjs/runtime/runtime';
 import { Canvas, esc } from './canvas';
 import { Editor } from './editor';
-import { iconSvg, ICON_IDS } from './icons';
+import { iconSvg, iconIds, setSymbols } from './icons';
 import { Plotter } from './plotter';
 import { ui } from './ui';
 import logoLockupMark from './assets/logo-lockup-mark.svg';
@@ -721,6 +721,9 @@ async function reload(notify = false) {
 
 async function loadCatalog() {
   state.catalog = (await API.GetCatalog()) as unknown as Catalog;
+  // Symbols come with the catalog; every icon and symbol drawn after this
+  // uses them, so install them before anything re-renders.
+  setSymbols(state.catalog?.symbols);
 }
 
 async function gotoSheet(qualified: string, push = true) {
@@ -1843,13 +1846,14 @@ function defaultForPrim(name: string): string {
 }
 
 function pickIcon(b: Block) {
-  const cells = ICON_IDS.map((id) =>
+  const cells = iconIds().map((id) =>
     `<div class="icon-cell ${id === b.icon ? 'sel' : ''}" data-icon="${esc(id)}" title="${esc(id)}">
        ${iconSvg(id)}
      </div>`).join('');
   const { root, close } = modal(`
     <h3>Symbol for ${esc(b.label)}</h3>
-    <div class="hint">Saved in the sidecar file, not in your .hvr source.</div>
+    <div class="hint">Saved in the sidecar file, not in your .hvr source. A symbol whose
+      pins don't match this block's ports is shown as the block's header icon instead.</div>
     <div class="icon-grid">${cells}</div>
     <div class="actions"><button data-x="no">Close</button></div>`);
 

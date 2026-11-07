@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 28" data-title="Digital block"
+     fill="none" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+  <style>.fill{fill:#000}.bold{stroke-width:3.2}.dash{stroke-dasharray:3 2.5}[data-pin]{fill:#d00;stroke:none}</style>
+  <path d="M0 14 H8 M40 14 H48"/>
+  <rect x="8" y="5" width="32" height="18"/>
+  <path d="M13 19 v-5 h6 v-5 h6 v10 h6 v-5"/>
+</svg>

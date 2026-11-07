@@ -596,7 +596,40 @@ svg.canvas.panning { cursor: grabbing; }
 .net-label.hot { fill: var(--wire-hot); }
 
 .gnd-sym { stroke: var(--wire); stroke-width: 1.6; fill: none; stroke-linecap: round; }
-.gnd-sym.hot { stroke: var(--wire-hot); }
+.gnd-sym .gnd-bar { fill: var(--wire); stroke: none; }
+.hot > .gnd-sym { stroke: var(--wire-hot); }
+.hot > .gnd-sym .gnd-bar { fill: var(--wire-hot); }
+
+/* Schematic symbols (internal/hvr/symbols). The line weight comes from --sw,
+   so a symbol scaled down into a palette glyph keeps a legible stroke; the
+   three classes are the whole styling vocabulary a symbol file may use. */
+.sym {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: var(--sw, 1.6);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.sym .fill { fill: currentColor; }
+.sym .bold { stroke-width: calc(var(--sw, 1.6) * 2); }
+.sym .dash { stroke-dasharray: 3 2.5; }
+
+/* A block drawn as its symbol: no card, just the drawing. The hit area is an
+   invisible box around it that shows on hover and selection. */
+/* Outranks `.block .sym` (the box header glyph's colour) so selection shows. */
+.sym-block.sel .sym { color: var(--canvas-accent); }
+.sym-hit { fill: transparent; stroke: none; }
+.block:hover .sym-hit { fill: var(--canvas-block-hi); fill-opacity: .45; }
+.block.sel .sym-hit { stroke: var(--canvas-accent); stroke-width: 1.4; stroke-dasharray: 4 3; }
+.sym-label {
+  paint-order: stroke;
+  stroke: var(--canvas-ground);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+/* Pin dots stay out of the drawing until they mean something. */
+.sym-pin { opacity: 0; }
+.block:hover .sym-pin, .sym-pin.hot { opacity: 1; }
 
 /* Blocks are cards: square, keylined, no radius. Selection is yellow. */
 .block { cursor: pointer; }

@@ -169,6 +169,7 @@ export namespace hvr {
 	    rot: number;
 	    flipX: boolean;
 	    flipY: boolean;
+	    symPins: number[];
 	
 	    static createFrom(source: any = {}) {
 	        return new Block(source);
@@ -200,6 +201,7 @@ export namespace hvr {
 	        this.rot = source["rot"];
 	        this.flipX = source["flipX"];
 	        this.flipY = source["flipY"];
+	        this.symPins = source["symPins"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -604,6 +606,82 @@ export namespace hvr {
 	}
 	
 	
+	
+	export class SymbolPin {
+	    name: string;
+	    aliases: string[];
+	    x: number;
+	    y: number;
+	    dir: string;
+	    optional: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new SymbolPin(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.aliases = source["aliases"];
+	        this.x = source["x"];
+	        this.y = source["y"];
+	        this.dir = source["dir"];
+	        this.optional = source["optional"];
+	    }
+	}
+	export class SymbolPart {
+	    markup: string;
+	    ifPin?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SymbolPart(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.markup = source["markup"];
+	        this.ifPin = source["ifPin"];
+	    }
+	}
+	export class Symbol {
+	    id: string;
+	    title: string;
+	    viewBox: number[];
+	    parts: SymbolPart[];
+	    pins: SymbolPin[];
+	
+	    static createFrom(source: any = {}) {
+	        return new Symbol(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.title = source["title"];
+	        this.viewBox = source["viewBox"];
+	        this.parts = this.convertValues(source["parts"], SymbolPart);
+	        this.pins = this.convertValues(source["pins"], SymbolPin);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
 
 }
 
@@ -613,6 +691,7 @@ export namespace main {
 	    primitives: hvr.PrimitiveDef[];
 	    stdlib: hvr.CatalogEntry[];
 	    local: hvr.CatalogEntry[];
+	    symbols: hvr.Symbol[];
 	
 	    static createFrom(source: any = {}) {
 	        return new Catalog(source);
@@ -623,6 +702,7 @@ export namespace main {
 	        this.primitives = this.convertValues(source["primitives"], hvr.PrimitiveDef);
 	        this.stdlib = this.convertValues(source["stdlib"], hvr.CatalogEntry);
 	        this.local = this.convertValues(source["local"], hvr.CatalogEntry);
+	        this.symbols = this.convertValues(source["symbols"], hvr.Symbol);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

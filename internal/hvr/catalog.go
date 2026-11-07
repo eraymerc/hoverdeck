@@ -66,15 +66,64 @@ func Primitives() []PrimitiveDef {
 var moduleIcons = map[string]string{
 	"NPN":   "npn",
 	"PNP":   "pnp",
+	"NMOS":  "nmos",
+	"NMOS4": "nmos4",
+	"PMOS":  "pmos",
+	"PMOS4": "pmos4",
 	"Diode": "diode",
 	"LED":   "led",
+	"OpAmp": "opamp",
 	"PMSM":  "motor",
 }
 
+// stdlibFamilyIcons maps a standard-library DIRECTORY to the symbol every
+// module declared inside it should wear.
+//
+// The part cards under `parts/` are named after the real device — Q2N2222,
+// D1N4007, MIRF9540N — and nothing in those names says which symbol to draw:
+// Q2N2222 is an NPN and Q2N2907 a PNP, and only the directory they sit in
+// tells them apart. So the family is read from the path, which is the same
+// thing the library itself uses to organise them.
+//
+// Longest-first: `parts/mosfet/nmos` has to win over any shorter prefix that
+// might later be added above it.
+var stdlibFamilyIcons = []struct{ dir, icon string }{
+	{"parts/bjt/npn", "npn"},
+	{"parts/bjt/pnp", "pnp"},
+	{"parts/mosfet/nmos", "nmos"},
+	{"parts/mosfet/pmos", "pmos"},
+	{"optoelectronics/leds", "led"},
+	{"parts/diode", "diode"},
+	{"electromechanical", "motor"},
+	{"analog/opamp", "opamp"},
+}
+
+// familyIcon returns the symbol implied by the directory a definition was
+// declared in, or "" when the path says nothing.
+func familyIcon(file string) string {
+	if file == "" {
+		return ""
+	}
+	dir := filepath.ToSlash(filepath.Dir(file))
+	for _, f := range stdlibFamilyIcons {
+		if dir == f.dir || strings.HasSuffix(dir, "/"+f.dir) {
+			return f.icon
+		}
+	}
+	return ""
+}
+
 // IconFor picks the symbol for a module instance. bare is the unqualified
-// module name; domain is its declared domain.
-func IconFor(bare, domain string) string {
+// module name; domain is its declared domain; file is the path of the file
+// that declares it, which may be empty when the definition was not found.
+func IconFor(bare, domain, file string) string {
 	if ic, ok := moduleIcons[bare]; ok {
+		return ic
+	}
+	// A part card wears its family's symbol. The device models themselves are
+	// named above; their part cards are not, and cannot be — nothing in
+	// "Q2N2222" or "MIRF9540N" says which symbol it wants.
+	if ic := familyIcon(file); ic != "" {
 		return ic
 	}
 	switch {
@@ -213,7 +262,7 @@ func scanDir(pkgs *Packages, dir string) []CatalogEntry {
 			out = append(out, CatalogEntry{
 				Kind:         "module",
 				Name:         def.Name,
-				Icon:         IconFor(def.Name, def.Domain),
+				Icon:         IconFor(def.Name, def.Domain, path),
 				Domain:       def.Domain,
 				Desc:         def.Doc,
 				Group:        importPath,

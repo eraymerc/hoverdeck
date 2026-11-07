@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 28" data-title="Structural block"
+     fill="none" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+  <style>.fill{fill:#000}.bold{stroke-width:3.2}.dash{stroke-dasharray:3 2.5}[data-pin]{fill:#d00;stroke:none}</style>
+  <rect x="6" y="5" width="36" height="18"/>
+  <path d="M6 11 H0 M6 17 H0 M42 11 H48 M42 17 H48"/>
+</svg>

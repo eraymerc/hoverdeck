@@ -27,10 +27,21 @@ formatting and everything else you wrote survive untouched.
 | **Block accent colour** | the module's domain: blue structural, green analog, purple digital, grey primitive |
 | **↧ badge** | the block can be opened as its own sheet |
 
-The standard library ships in the palette with conventional schematic symbols —
-resistor, capacitor, inductor, the SPICE diamond for controlled sources, BJT symbols
-for `NPN`/`PNP`, a diode/LED, and a motor circle for `PMSM`. Primitives are labelled
-with SPICE reference designators (`R1`, `C2`, `V1`, …).
+Primitives and standard-library devices are drawn as real schematic symbols in the
+Elektuur style of the late '70s–'80s, with wires attached to the ends of their leads —
+resistor, capacitor, inductor, voltage and current sources, the SPICE diamond for
+controlled sources, BJTs for `NPN`/`PNP`, MOSFETs for `NMOS`/`PMOS` (body arrow tied
+to the source) and `NMOS4`/`PMOS4` (bulk brought out), a diode/LED, an op-amp
+triangle, and a motor circle for `PMSM`. A module with no matching symbol is drawn as
+a box. Primitives are labelled with SPICE reference designators (`R1`, `C2`, `V1`, …).
+
+Symbols are plain SVG files in `internal/hvr/symbols/`, with pins marked in the
+drawing; the format, and how a module's ports find a symbol's pins, is written down in
+[`internal/hvr/symbols/README.md`](internal/hvr/symbols/README.md).
+
+The **part cards** under `parts/` — `Q2N2222`, `D1N4007`, `M2N7000`, `MIRF9540N` and
+the rest — get their family's symbol from the directory they are declared in, since
+nothing in the name of a real device says whether it is an NPN or a PNP.
 
 ## What you can do
 

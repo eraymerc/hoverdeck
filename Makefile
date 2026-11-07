@@ -105,17 +105,32 @@ build: linux-x86_64
 build-windows: windows-x86_64
 
 ## dev — live-reloading development window
-dev:
-	wails dev $(TAGS)
+dev: embed-dir
+	wails dev $(TAGS) -skipembedcreate
+
+# ── EMBED DIRECTORY ───────────────────────────────────────────────────────────
+# wails build/dev are run with -skipembedcreate, and this target does that step
+# instead. The step it skips only makes sure frontend/dist exists for the
+# `//go:embed all:frontend/dist` in main.go, but to find embed directives it
+# type-checks the whole project with the golang.org/x/tools that the wails CLI
+# was built with — and Wails v2.13.0's x/tools (v0.44.0) cannot read Go 1.27's
+# standard-library export data, dying with
+#   internal error: package "bufio" without types was imported from ...
+# Drop -skipembedcreate and this target once the wails CLI is rebuilt against
+# an x/tools that supports the Go toolchain in use.
+.PHONY: embed-dir
+embed-dir:
+	@mkdir -p frontend/dist
+	@test -n "$$(ls -A frontend/dist)" || touch frontend/dist/.gitkeep
 
 # ── PER-PLATFORM BUILD TEMPLATE ───────────────────────────────────────────────
 
 define PLATFORM_TEMPLATE
 
 .PHONY: $(1)
-$(1): $(ICON_ICO)
+$(1): $(ICON_ICO) embed-dir
 	@echo "\n[$(1)] wails build -platform $$($(1)_WAILS)"
-	wails build -platform $$($(1)_WAILS) \
+	wails build -platform $$($(1)_WAILS) -skipembedcreate \
 		$$(if $$(filter linux/%,$$($(1)_WAILS)),$(TAGS)) \
 		-o hoverdeck-$(1)$$(if $$(filter windows/%,$$($(1)_WAILS)),.exe)
 	@echo "[$(1)] Binary ready: build/bin/hoverdeck-$(1)$$(if $$(filter windows/%,$$($(1)_WAILS)),.exe)"

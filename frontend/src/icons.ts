@@ -1,145 +1,99 @@
 /**
- * Schematic symbols, drawn as stroke-based SVG in a 48x28 box.
+ * Schematic symbols.
  *
- * These are deliberately conventional: a Hover user reading the canvas should
- * recognise a resistor or a BJT from the same shape they'd see in any
- * schematic, rather than having to learn a hoverdeck-specific glyph.
+ * The drawings live in internal/hvr/symbols/*.svg, Elektuur style, and reach
+ * the page through the catalog already sanitised: the Go side parses each file
+ * against a whitelist and re-serialises it, so the markup here is only ever
+ * shapes with numeric geometry and one of three classes. See the README there
+ * for the format.
+ *
+ * A symbol is used two ways:
+ *   - on the canvas, at full size, with wires attached to its pins
+ *     (canvas.ts), when it fits the block's ports;
+ *   - as a small glyph — the palette, the inspector, the header of a block
+ *     drawn as a box — through iconSvg below.
  */
 
-const W = 48;
-const H = 28;
-const CY = H / 2;
+import type { SymbolDef } from './types';
 
-/** Leads running to the left and right edges, stopping at x1/x2. */
-function leads(x1: number, x2: number): string {
-  return `<path d="M0 ${CY} H${x1} M${x2} ${CY} H${W}"/>`;
+let SYMBOLS = new Map<string, SymbolDef>();
+
+/** Installs the symbol set the backend sent with the catalog. */
+export function setSymbols(list: SymbolDef[] | null | undefined) {
+  if (!list || list.length === 0) return; // keep what we had rather than blank every icon
+  SYMBOLS = new Map(list.map((s) => [s.id, s]));
 }
 
-const SYMBOLS: Record<string, string> = {
-  // ── Passives ──────────────────────────────────────────────────────────────
-  resistor:
-    leads(10, 38) +
-    `<path d="M10 ${CY} l3 -7 l5 14 l5 -14 l5 14 l5 -14 l3 7"/>`,
-
-  capacitor:
-    leads(21, 27) +
-    `<path d="M21 4 V24 M27 4 V24"/>`,
-
-  inductor:
-    leads(8, 40) +
-    `<path d="M8 ${CY} a4 4 0 0 1 8 0 a4 4 0 0 1 8 0 a4 4 0 0 1 8 0 a4 4 0 0 1 8 0"/>`,
-
-  // ── Sources ───────────────────────────────────────────────────────────────
-  vsource:
-    leads(12, 36) +
-    `<circle cx="24" cy="${CY}" r="12"/>` +
-    `<path d="M18 10 h6 M21 7 v6 M18 19 h6"/>`,
-
-  isource:
-    leads(12, 36) +
-    `<circle cx="24" cy="${CY}" r="12"/>` +
-    `<path d="M24 21 V7 M20 11 l4 -4 l4 4"/>`,
-
-  // Controlled sources use the diamond outline, as in SPICE documentation.
-  vcvs:
-    leads(12, 36) +
-    `<path d="M24 2 L36 ${CY} L24 26 L12 ${CY} Z"/>` +
-    `<path d="M19 10 h5 M21.5 7.5 v5 M19 19 h5"/>`,
-
-  vccs:
-    leads(12, 36) +
-    `<path d="M24 2 L36 ${CY} L24 26 L12 ${CY} Z"/>` +
-    `<path d="M24 21 V8 M20.5 11.5 l3.5 -3.5 l3.5 3.5"/>`,
-
-  ccvs:
-    leads(12, 36) +
-    `<path d="M24 2 L36 ${CY} L24 26 L12 ${CY} Z"/>` +
-    `<path d="M19 10 h5 M21.5 7.5 v5 M19 19 h5"/>` +
-    `<path d="M14 24 l6 -6" stroke-dasharray="2 2"/>`,
-
-  cccs:
-    leads(12, 36) +
-    `<path d="M24 2 L36 ${CY} L24 26 L12 ${CY} Z"/>` +
-    `<path d="M24 21 V8 M20.5 11.5 l3.5 -3.5 l3.5 3.5"/>` +
-    `<path d="M14 24 l6 -6" stroke-dasharray="2 2"/>`,
-
-  // ── Semiconductors ────────────────────────────────────────────────────────
-  diode:
-    leads(16, 32) +
-    `<path d="M16 6 V22 L32 ${CY} Z" class="fillable"/>` +
-    `<path d="M32 6 V22"/>`,
-
-  led:
-    leads(16, 32) +
-    `<path d="M16 6 V22 L32 ${CY} Z" class="fillable"/>` +
-    `<path d="M32 6 V22"/>` +
-    `<path d="M34 10 l6 -6 M37 4 h3 v3" />` +
-    `<path d="M38 16 l6 -6 M41 10 h3 v3" />`,
-
-  // NPN: emitter arrow points away from the base.
-  npn:
-    `<path d="M0 ${CY} H14"/>` +
-    `<path d="M14 4 V24"/>` +
-    `<path d="M14 10 L30 4 M14 18 L30 24"/>` +
-    `<path d="M30 4 V0 M30 24 V28"/>` +
-    `<path d="M24 20.5 l6 3.5 l-2.5 -5.5" class="fillable"/>`,
-
-  // PNP: emitter arrow points toward the base.
-  pnp:
-    `<path d="M0 ${CY} H14"/>` +
-    `<path d="M14 4 V24"/>` +
-    `<path d="M14 10 L30 4 M14 18 L30 24"/>` +
-    `<path d="M30 4 V0 M30 24 V28"/>` +
-    `<path d="M14 18 l6.5 0.5 l-4 4" class="fillable"/>`,
-
-  // ── Composite blocks ──────────────────────────────────────────────────────
-  motor:
-    leads(12, 36) +
-    `<circle cx="24" cy="${CY}" r="12"/>` +
-    `<path d="M18 19 V9 l6 10 l6 -10 v10"/>`,
-
-  opamp:
-    `<path d="M0 8 H12 M0 20 H12 M36 ${CY} H48"/>` +
-    `<path d="M12 2 L36 ${CY} L12 26 Z"/>` +
-    `<path d="M15 8 h4 M17 6 v4"/>` +
-    `<path d="M15 20 h4"/>`,
-
-  filter:
-    `<path d="M0 ${CY} H8 M40 ${CY} H48"/>` +
-    `<rect x="8" y="6" width="32" height="16"/>` +
-    `<path d="M12 20 C20 20 20 10 28 10 L36 10"/>`,
-
-  // ── Domain fallbacks ──────────────────────────────────────────────────────
-  analog:
-    `<path d="M0 ${CY} H8 M40 ${CY} H48"/>` +
-    `<rect x="8" y="5" width="32" height="18"/>` +
-    `<path d="M13 ${CY} c4 -8 8 8 12 0 c4 -8 8 8 10 0"/>`,
-
-  digital:
-    `<path d="M0 ${CY} H8 M40 ${CY} H48"/>` +
-    `<rect x="8" y="5" width="32" height="18"/>` +
-    `<path d="M13 19 v-5 h6 v-5 h6 v10 h6 v-5"/>`,
-
-  structural:
-    `<rect x="6" y="5" width="36" height="18"/>` +
-    `<path d="M6 11 H0 M6 17 H0 M42 11 H48 M42 17 H48"/>`,
-};
-
-/** Every icon id available for the picker. */
-export const ICON_IDS = Object.keys(SYMBOLS);
+export function symbolOf(id: string): SymbolDef | undefined {
+  return SYMBOLS.get(id);
+}
 
 /**
- * Renders one symbol as an <svg> element sized to fit a block header.
+ * Every symbol id, for the picker: pin-anchored symbols first, then the
+ * header-only glyphs, each group by name.
+ */
+export function iconIds(): string[] {
+  const anchored = (s: SymbolDef) => (s.pins?.length ?? 0) > 0;
+  return [...SYMBOLS.values()]
+    .sort((a, b) => Number(anchored(b)) - Number(anchored(a)) || a.id.localeCompare(b.id))
+    .map((s) => s.id);
+}
+
+/**
+ * The drawing of a symbol in its own coordinates. Parts tied to an optional
+ * pin are drawn only when that pin is in `connected`; pass null to leave all
+ * of them out, which is what a small glyph wants.
+ */
+export function symbolBody(sym: SymbolDef, connected: Set<string> | null): string {
+  return (sym.parts ?? [])
+    .filter((p) => !p.ifPin || (connected?.has(p.ifPin) ?? false))
+    .map((p) => p.markup)
+    .join('');
+}
+
+/** Before the catalog arrives, and for an id nothing defines. */
+const FALLBACK =
+  `<rect x="6" y="5" width="36" height="18"/>` +
+  `<path d="M6 11 H0 M6 17 H0 M42 11 H48 M42 17 H48"/>`;
+
+const ICON_W = 48;
+const ICON_H = 28;
+/** Line weight a glyph should have on screen, whatever it was scaled by. */
+const ICON_STROKE = 1.5;
+
+/**
+ * Renders a symbol as a small <svg> glyph, 48x28 by default.
+ *
+ * A tall symbol — the passives and sources stand upright on the canvas, as in
+ * the reference library — is turned on its side here so a row of palette
+ * entries reads left to right. That turn is presentation only; the canvas
+ * draws the symbol as it is.
  */
 export function iconSvg(id: string, cls = ''): string {
-  const body = SYMBOLS[id] ?? SYMBOLS.structural;
-  return `<svg class="sym ${cls}" viewBox="0 0 ${W} ${H}" width="48" height="28"
-     fill="none" stroke="currentColor" stroke-width="1.8"
-     stroke-linecap="round" stroke-linejoin="round">${body}</svg>`;
+  const sym = SYMBOLS.get(id) ?? SYMBOLS.get('structural');
+  if (!sym) {
+    return `<svg class="sym ${cls}" viewBox="0 0 ${ICON_W} ${ICON_H}" width="${ICON_W}" height="${ICON_H}" ` +
+      `style="--sw:${ICON_STROKE}">${FALLBACK}</svg>`;
+  }
+
+  let [x, y, w, h] = sym.viewBox;
+  let body = symbolBody(sym, null);
+  if (h > w * 1.25) {
+    // rotate(-90) sends (x, y) to (y, -x): the top pin ends up on the left.
+    body = `<g transform="rotate(-90)">${body}</g>`;
+    [x, y, w, h] = [y, -(x + w), h, w];
+  }
+
+  // The stroke scales with the viewBox, so undo that to keep lines legible.
+  const scale = Math.min(ICON_W / w, ICON_H / h);
+  const sw = +(ICON_STROKE / scale).toFixed(3);
+  return `<svg class="sym ${cls}" viewBox="${x} ${y} ${w} ${h}" width="${ICON_W}" height="${ICON_H}" ` +
+    `style="--sw:${sw}"><title>${esc(sym.title)}</title>${body}</svg>`;
 }
 
 /**
- * The ground symbol drawn at every net named `gnd`.
+ * The ground symbol drawn at every pin on net `gnd`: the Elektuur bar — a
+ * short stem into a solid plate.
  *
  * Ground is rendered as a local terminal at each pin rather than as a routed
  * net. In a circuit of any size gnd touches most blocks, so routing it would
@@ -151,13 +105,14 @@ export function groundSymbol(
   y: number,
   dir: 'left' | 'right' | 'up' | 'down',
 ): string {
-  // The symbol is drawn once pointing right, then rotated to face the pin's
-  // direction, so all four orientations stay identical in shape.
+  // Drawn once pointing right, then turned to face the way the pin leaves.
   const angle = { right: 0, down: 90, left: 180, up: 270 }[dir];
-  const bars =
-    `<path d="M0 0 H14"/>` +
-    `<path d="M14 -6 V6"/>` +
-    `<path d="M18 -3.5 V3.5"/>` +
-    `<path d="M22 -1.5 V1.5"/>`;
-  return `<g class="gnd-sym" transform="translate(${x} ${y}) rotate(${angle})">${bars}</g>`;
+  const shape =
+    `<path d="M0 0 H13.6"/>` +
+    `<rect class="gnd-bar" x="13.6" y="-12" width="4.8" height="24"/>`;
+  return `<g class="gnd-sym" transform="translate(${x} ${y}) rotate(${angle})">${shape}</g>`;
+}
+
+function esc(s: string): string {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }

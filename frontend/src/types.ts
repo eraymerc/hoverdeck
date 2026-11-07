@@ -69,6 +69,12 @@ export interface Block {
   rot: number;
   flipX: boolean;
   flipY: boolean;
+  /**
+   * For each entry of `pins`, the index of the symbol pin it attaches to in
+   * the symbol named by `icon`. Null when that symbol does not fit this
+   * block's ports, and the block is drawn as a box instead.
+   */
+  symPins: number[] | null;
 }
 
 export interface NetPin {
@@ -267,6 +273,35 @@ export interface Catalog {
   primitives: PrimitiveDef[] | null;
   stdlib: CatalogEntry[] | null;
   local: CatalogEntry[] | null;
+  symbols: SymbolDef[] | null;
+}
+
+/** A pin of a schematic symbol — see internal/hvr/symbols/README.md. */
+export interface SymbolPin {
+  name: string;
+  aliases: string[] | null;
+  x: number;
+  y: number;
+  /** The way the wire leaves the pin. */
+  dir: 'left' | 'right' | 'up' | 'down';
+  optional: boolean;
+}
+
+/** One sanitised drawing element; drawn only when `ifPin` is connected. */
+export interface SymbolPart {
+  markup: string;
+  ifPin?: string;
+}
+
+/** A schematic symbol, already sanitised by the Go side. */
+export interface SymbolDef {
+  id: string;
+  title: string;
+  /** minX, minY, width, height. The origin is the block's position. */
+  viewBox: [number, number, number, number];
+  parts: SymbolPart[] | null;
+  /** Empty for a header glyph that only ever decorates a box. */
+  pins: SymbolPin[] | null;
 }
 
 export interface InsertRequest {

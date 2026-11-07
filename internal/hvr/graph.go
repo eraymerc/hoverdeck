@@ -77,6 +77,12 @@ type Block struct {
 	Rot   int  `json:"rot"`
 	FlipX bool `json:"flipX"`
 	FlipY bool `json:"flipY"`
+
+	// SymPins maps each entry of Pins to a pin of the symbol named by Icon,
+	// as an index into that symbol's pin list. Nil when the symbol does not
+	// fit this block's ports, and the canvas draws a box instead. Set by
+	// FitSymbols, after the sidecar's icon override is known.
+	SymPins []int `json:"symPins"`
 }
 
 // NetPin is one endpoint of a net.
@@ -254,7 +260,9 @@ func (p *Project) BuildSheet(qualified string) (*Sheet, error) {
 					"line %d: module %q is not visible here — is its import missing?", n.Token.Line, n.ModuleName))
 				b.Pins = bindPins(src, g.PhysArgs, nil, -1)
 			}
-			b.Icon = IconFor(bare, b.Domain)
+			// b.Def.File is empty when the definition was not found, which is
+			// exactly the "path says nothing" case IconFor handles.
+			b.Icon = IconFor(bare, b.Domain, b.Def.File)
 			b.Params = g.StaticArgs
 			b.Logic = g.LogicArgs
 

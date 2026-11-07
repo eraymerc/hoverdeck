@@ -125,6 +125,30 @@ func bundledRoots(dir string) map[string]string {
 func (p *Packages) install() {
 	loader.SetPackageRoots(p.Roots)
 	loader.SetStdlibPackageNames(hpm.StdlibImportNames())
+
+	// The machine-wide list is consulted only when an import fails, to tell
+	// "not installed" apart from "installed, but not a dependency of the
+	// project this file belongs to" — the second is the common case in
+	// hoverdeck, where a workspace is browsed file by file, and it is the one
+	// whose fix is `hover hpm install` FROM THE PROJECT DIRECTORY rather than
+	// another machine-wide install that changes nothing. Same lookup the
+	// compiler binary installs for itself.
+	loader.SetMachineInstalledPackages(machineInstalledPackageNames)
+}
+
+// machineInstalledPackageNames lists every package installed machine-wide.
+// Mirrors hover's own; it is called only on the import-failure path, so the
+// machine lockfile is not read on every load.
+func machineInstalledPackageNames() []string {
+	roots, err := hpm.MachineRoots()
+	if err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(roots))
+	for name := range roots {
+		names = append(names, name)
+	}
+	return names
 }
 
 // Names returns the package names in the table, sorted.

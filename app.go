@@ -257,6 +257,9 @@ func (a *App) GetSheet(qualified string) (*hvr.Sheet, error) {
 		return nil, err
 	}
 	a.layout.Apply(sh)
+	// After Apply: the sidecar may override a block's icon, and the symbol
+	// that has to fit is the one that will actually be drawn.
+	hvr.FitSymbols(sh, hvr.BuiltinSymbols())
 	return sh, nil
 }
 
@@ -353,12 +356,17 @@ type Catalog struct {
 	// the palette section is called.
 	Stdlib []hvr.CatalogEntry `json:"stdlib"`
 	Local  []hvr.CatalogEntry `json:"local"`
+
+	// Symbols is every schematic symbol the canvas can draw, by id. It rides
+	// along with the catalog because it is reloaded at the same moments, and
+	// symbols shipped by packages will arrive through the same package table.
+	Symbols []*hvr.Symbol `json:"symbols"`
 }
 
 // GetCatalog returns the built-in primitives, every installed package, and the
 // modules declared in the open project itself.
 func (a *App) GetCatalog() *Catalog {
-	c := &Catalog{Primitives: hvr.Primitives()}
+	c := &Catalog{Primitives: hvr.Primitives(), Symbols: hvr.BuiltinSymbols().All()}
 	c.Stdlib = hvr.ScanPackages(a.packages)
 
 	if a.project != nil {
@@ -378,7 +386,7 @@ func (a *App) GetCatalog() *Catalog {
 			c.Local = append(c.Local, hvr.CatalogEntry{
 				Kind:         "module",
 				Name:         d.Name,
-				Icon:         hvr.IconFor(d.Name, d.Domain),
+				Icon:         hvr.IconFor(d.Name, d.Domain, d.File),
 				Domain:       d.Domain,
 				Desc:         d.Doc,
 				Group:        filepath.Base(d.File),

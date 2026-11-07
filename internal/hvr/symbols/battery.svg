@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-28 -32 56 64" data-title="Battery / DC supply"
+     fill="none" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+  <style>.fill{fill:#000}.bold{stroke-width:3.2}.dash{stroke-dasharray:3 2.5}[data-pin]{fill:#d00;stroke:none}</style>
+  <path d="M0 -32 V-5.92 M0 5.92 V32"/>
+  <rect x="-24.8" y="-5.92" width="49.6" height="1.6" class="fill"/>
+  <rect x="-12" y="1.12" width="24" height="4.8" class="fill"/>
+  <circle data-pin="n+" data-alias="+ p a 1 pos" data-dir="up" cx="0" cy="-32" r="2"/>
+  <circle data-pin="n-" data-alias="- n b 2 neg" data-dir="down" cx="0" cy="32" r="2"/>
+</svg>
