@@ -936,6 +936,7 @@ svg.canvas.panning { cursor: grabbing; }
   font-variant-numeric: tabular-nums;
 }
 .gutter .gl.hl { color: var(--color-yellow); font-weight: var(--weight-strong); }
+.gutter-in { will-change: transform; }
 
 .code-scroll { flex: 1; position: relative; overflow: auto; }
 .code-sizer { position: relative; }

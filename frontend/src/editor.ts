@@ -184,7 +184,7 @@ export class Editor {
         <button id="find-repall">All</button>
       </div>
       <div class="editor">
-        <div class="gutter"></div>
+        <div class="gutter"><div class="gutter-in"></div></div>
         <div class="code-scroll">
           <div class="code-sizer">
             <div class="hl-band" style="display:none"></div>
@@ -201,7 +201,7 @@ export class Editor {
         <button class="save-btn primary" disabled>Save</button>
       </div>`;
 
-    this.gutter = this.el.querySelector('.gutter')!;
+    this.gutter = this.el.querySelector('.gutter-in')!;
     this.scroll = this.el.querySelector('.code-scroll')!;
     this.sizer = this.el.querySelector('.code-sizer')!;
     this.pre = this.el.querySelector('.code-pre')!;
@@ -404,10 +404,22 @@ export class Editor {
     this.updatePos();
   }
 
-  private lineHeight = 19;
-  private padTop = 10;
+  // Line metrics, read from the stylesheet rather than assumed: the sizer, the
+  // highlight band and every scroll-to-line position are computed from them,
+  // so a guess that is off by one pixel puts line 300 three hundred pixels out.
+  private lineHeight = 20;
+  private padTop = 12;
+
+  private measure() {
+    const cs = getComputedStyle(this.pre);
+    const lh = parseFloat(cs.lineHeight);
+    const pt = parseFloat(cs.paddingTop);
+    if (lh > 0) this.lineHeight = lh;
+    if (pt >= 0) this.padTop = pt;
+  }
 
   private repaint() {
+    this.measure();
     const text = this.ta.value;
     this.pre.innerHTML = highlight(text) + '\n';
 
@@ -428,8 +440,13 @@ export class Editor {
     (this.el.querySelector('.save-btn') as HTMLButtonElement).disabled = !this.dirty;
   }
 
+  /**
+   * Moves the line numbers with the code. Only the inner strip moves; the
+   * gutter itself stays put and clips it. (Scrolling the gutter AND translating
+   * it moved the numbers twice as far as the code and pushed the gutter's own
+   * box out of view, so they vanished once a file was a screen long.)
+   */
   private syncScroll() {
-    this.gutter.scrollTop = this.scroll.scrollTop;
     this.gutter.style.transform = `translateY(${-this.scroll.scrollTop}px)`;
   }
 
