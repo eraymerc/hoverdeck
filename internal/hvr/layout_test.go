@@ -1,6 +1,11 @@
 package hvr
 
-import "testing"
+import (
+	"math"
+	"os"
+	"strings"
+	"testing"
+)
 
 const layoutSrc = `module main<>() [] {
     wire n;
@@ -128,135 +133,160 @@ func TestBlockTransformPersistsAndNormalises(t *testing.T) {
 	}
 }
 
-func TestNetTrunkStoresBothAxes(t *testing.T) {
-	entry := writeTemp(t, map[string]string{"main.hvr": layoutSrc})
-	p, _ := LoadProject(entry, nil)
-	sh, _ := p.BuildSheet("main")
-
-	l := LoadLayout(entry)
-	l.SetNetTrunk("main", "n", 512, -48)
-	if err := l.Save(entry); err != nil {
-		t.Fatal(err)
-	}
-
-	l2 := LoadLayout(entry)
-	l2.Apply(sh)
-	for _, n := range sh.Nets {
-		if n.Name != "n" {
-			continue
-		}
-		if !n.HasTrunk {
-			t.Error("trunk should be marked as hand-placed")
-		}
-		if n.TrunkX != 512 {
-			t.Errorf("trunkX: got %v, want 512", n.TrunkX)
-		}
-		if n.TrunkDY != -48 {
-			t.Errorf("trunkDY: got %v, want -48", n.TrunkDY)
+func netNamed(sh *Sheet, name string) *Net {
+	for i := range sh.Nets {
+		if sh.Nets[i].Name == name {
+			return &sh.Nets[i]
 		}
 	}
-
-	// A trunk pinned at x = 0 must still count as set, which is why the
-	// stored fields are pointers rather than plain floats.
-	l2.SetNetTrunk("main", "n", 0, 0)
-	nl := l2.Sheet("main").Nets["n"]
-	if nl.TrunkX == nil || *nl.TrunkX != 0 {
-		t.Error("a trunk at x=0 must be distinguishable from unset")
-	}
-
-	// Clearing returns the net to automatic routing on both axes.
-	l2.ClearNetTrunk("main", "n")
-	nl = l2.Sheet("main").Nets["n"]
-	if nl.TrunkX != nil || nl.TrunkDY != nil {
-		t.Error("clearing should drop both axes")
-	}
+	return nil
 }
 
-func TestLegDYMovesOneLegIndependently(t *testing.T) {
+func TestNetWiresPersistAndApply(t *testing.T) {
 	entry := writeTemp(t, map[string]string{"main.hvr": layoutSrc})
 	p, _ := LoadProject(entry, nil)
 	sh, _ := p.BuildSheet("main")
 
-	// Net "n" has two legs: the voltage source's n+ pin (V1:0) and R's n+
-	// pin (R1:0). Moving one must not move the other — that independence
-	// is the entire point of LegDY existing separately from TrunkDY.
+	wires := []WireSeg{{0, 0, 64, 0}, {64, 0, 64, 48}}
 	l := LoadLayout(entry)
-	l.SetLegDY("main", "n", "V1:0", 40)
+	if err := l.SetNetWires("main", "n", wires); err != nil {
+		t.Fatal(err)
+	}
 	if err := l.Save(entry); err != nil {
 		t.Fatal(err)
 	}
 
-	l2 := LoadLayout(entry)
-	l2.Apply(sh)
-
-	var got *Net
-	for i := range sh.Nets {
-		if sh.Nets[i].Name == "n" {
-			got = &sh.Nets[i]
-		}
-	}
-	if got == nil {
+	LoadLayout(entry).Apply(sh)
+	n := netNamed(sh, "n")
+	if n == nil {
 		t.Fatal("net n missing from the sheet")
 	}
-	if got.LegDY["V1:0"] != 40 {
-		t.Errorf("V1:0 offset: got %v, want 40", got.LegDY["V1:0"])
+	if len(n.Wires) != 2 || n.Wires[0] != wires[0] || n.Wires[1] != wires[1] {
+		t.Errorf("wires: got %v, want %v", n.Wires, wires)
 	}
-	if got.LegDY["R1:0"] != 0 {
-		t.Errorf("R1:0 should be untouched, got %v", got.LegDY["R1:0"])
-	}
-
-	// Setting the net's bulk TrunkDY must not disturb the per-leg offset
-	// already recorded for V1:0 — the two are independent, additive knobs.
-	l2.SetNetTrunk("main", "n", got.TrunkX, 10)
-	l2.Apply(sh)
-	for i := range sh.Nets {
-		if sh.Nets[i].Name != "n" {
-			continue
-		}
-		if sh.Nets[i].TrunkDY != 10 {
-			t.Errorf("bulk TrunkDY: got %v, want 10", sh.Nets[i].TrunkDY)
-		}
-		if sh.Nets[i].LegDY["V1:0"] != 40 {
-			t.Errorf("per-leg offset should survive a bulk trunk move, got %v", sh.Nets[i].LegDY["V1:0"])
+	for _, other := range sh.Nets {
+		if other.Name != "n" && other.Wires != nil {
+			t.Errorf("net %q picked up wires it never had: %v", other.Name, other.Wires)
 		}
 	}
 }
 
-func TestLegDYNeverSerialisesAsNull(t *testing.T) {
-	entry := writeTemp(t, map[string]string{"main.hvr": layoutSrc})
-	p, _ := LoadProject(entry, nil)
-	sh, err := p.BuildSheet("main")
-	if err != nil {
+// An empty drawing is "route this net automatically", and ClearNetWires is
+// just that.
+func TestEmptyWiresReturnNetToAutomatic(t *testing.T) {
+	l := &Layout{Sheets: map[string]*SheetLayout{}}
+	if err := l.SetNetWires("main", "n", []WireSeg{{0, 0, 16, 0}}); err != nil {
 		t.Fatal(err)
 	}
-	for _, n := range sh.Nets {
-		if n.LegDY == nil {
-			t.Errorf("net %q: LegDY is nil, which marshals to JSON null and breaks the frontend", n.Name)
-		}
+	if err := l.SetNetWires("main", "n", nil); err != nil {
+		t.Fatal(err)
+	}
+	if w := l.Sheet("main").Nets["n"].Wires; w != nil {
+		t.Errorf("wires should be gone, got %v", w)
 	}
 }
 
-func TestClearNetTrunkAlsoClearsLegOffsets(t *testing.T) {
+func TestNetWiresRejectWhatTheCanvasNeverDraws(t *testing.T) {
+	l := &Layout{Sheets: map[string]*SheetLayout{}}
+	bad := map[string][]WireSeg{
+		"diagonal":   {{0, 0, 16, 16}},
+		"NaN":        {{math.NaN(), 0, 16, 0}},
+		"infinite":   {{0, 0, math.Inf(1), 0}},
+		"over limit": make([]WireSeg, maxWireSegs+1),
+	}
+	for name, w := range bad {
+		if err := l.SetNetWires("main", "n", w); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	// A rejected drawing must not have replaced a good one.
+	good := []WireSeg{{0, 0, 16, 0}}
+	_ = l.SetNetWires("main", "n", good)
+	_ = l.SetNetWires("main", "n", bad["diagonal"])
+	if w := l.Sheet("main").Nets["n"].Wires; len(w) != 1 || w[0] != good[0] {
+		t.Errorf("a rejected drawing replaced the saved one: %v", w)
+	}
+}
+
+// Logic-signal links are saved and restored like nets, but under their own
+// key: a wire and a signal never share a drawing.
+func TestSignalWiresPersistApartFromNets(t *testing.T) {
 	entry := writeTemp(t, map[string]string{"main.hvr": layoutSrc})
 	p, _ := LoadProject(entry, nil)
 	sh, _ := p.BuildSheet("main")
 
+	link := []WireSeg{{80, 40, 80, 64}, {80, 64, 160, 64}}
 	l := LoadLayout(entry)
-	l.SetNetTrunk("main", "n", 400, 20)
-	l.SetLegDY("main", "n", "V1:0", 40)
-	l.ClearNetTrunk("main", "n")
-	l.Apply(sh)
+	if err := l.SetSignalWires("main", "ctrl", link); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Save(entry); err != nil {
+		t.Fatal(err)
+	}
+	LoadLayout(entry).Apply(sh)
 
+	var ctrl *Signal
+	for i := range sh.Signals {
+		if sh.Signals[i].Name == "ctrl" {
+			ctrl = &sh.Signals[i]
+		}
+	}
+	if ctrl == nil {
+		t.Fatal("signal ctrl missing from the sheet")
+	}
+	if len(ctrl.Wires) != 2 || ctrl.Wires[1] != link[1] {
+		t.Errorf("signal wires: got %v, want %v", ctrl.Wires, link)
+	}
 	for _, n := range sh.Nets {
-		if n.Name != "n" {
-			continue
+		if n.Wires != nil {
+			t.Errorf("net %q picked up the signal's drawing", n.Name)
 		}
-		if n.HasTrunk {
-			t.Error("clearing should drop the hand-placed trunk")
+	}
+
+	if err := l.SetSignalWires("main", "ctrl", []WireSeg{{0, 0, 8, 8}}); err == nil {
+		t.Error("a diagonal link segment was accepted")
+	}
+	if err := l.SetSignalWires("main", "ctrl", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := l.Sheet("main").Links["ctrl"]; ok {
+		t.Error("clearing a signal's drawing should drop its entry")
+	}
+}
+
+// Version-1 sidecars stored trunk/leg offsets. They are not converted: the
+// nets come back automatic, and saving writes version 2 without them.
+func TestVersion1RoutingIsDroppedNotConverted(t *testing.T) {
+	entry := writeTemp(t, map[string]string{"main.hvr": layoutSrc})
+	old := `{"version": 1, "sheets": {"main": {"blocks": {}, "nets": {
+		"n": {"color": "#f00", "trunkX": 512, "trunkDY": -48, "legs": {"V1:0": 40}}}}}}`
+	if err := os.WriteFile(LayoutPath(entry), []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := LoadProject(entry, nil)
+	sh, _ := p.BuildSheet("main")
+
+	l := LoadLayout(entry)
+	l.Apply(sh)
+	n := netNamed(sh, "n")
+	if n.Wires != nil {
+		t.Errorf("version-1 routing turned into wires: %v", n.Wires)
+	}
+	if n.Color != "#f00" {
+		t.Error("the net's colour should survive")
+	}
+
+	if err := l.Save(entry); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(LayoutPath(entry))
+	for _, gone := range []string{"trunkX", "trunkDY", "legs"} {
+		if strings.Contains(string(raw), gone) {
+			t.Errorf("%q still in the saved sidecar", gone)
 		}
-		if len(n.LegDY) != 0 {
-			t.Errorf("clearing should drop per-leg offsets too, got %v", n.LegDY)
-		}
+	}
+	if !strings.Contains(string(raw), `"version": 2`) {
+		t.Error("the saved sidecar should say version 2")
 	}
 }
 

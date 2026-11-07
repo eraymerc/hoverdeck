@@ -419,11 +419,8 @@ export namespace hvr {
 	    declLine: number;
 	    isBoundary: boolean;
 	    pins: NetPin[];
-	    trunkX: number;
-	    trunkDY: number;
-	    hasTrunk: boolean;
 	    color?: string;
-	    legDY: Record<string, number>;
+	    wires: number[][];
 	
 	    static createFrom(source: any = {}) {
 	        return new Net(source);
@@ -437,11 +434,8 @@ export namespace hvr {
 	        this.declLine = source["declLine"];
 	        this.isBoundary = source["isBoundary"];
 	        this.pins = this.convertValues(source["pins"], NetPin);
-	        this.trunkX = source["trunkX"];
-	        this.trunkDY = source["trunkDY"];
-	        this.hasTrunk = source["hasTrunk"];
 	        this.color = source["color"];
-	        this.legDY = source["legDY"];
+	        this.wires = source["wires"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -517,6 +511,7 @@ export namespace hvr {
 	    span: Span;
 	    x: number;
 	    y: number;
+	    wires: number[][];
 	
 	    static createFrom(source: any = {}) {
 	        return new Signal(source);
@@ -532,6 +527,7 @@ export namespace hvr {
 	        this.span = this.convertValues(source["span"], Span);
 	        this.x = source["x"];
 	        this.y = source["y"];
+	        this.wires = source["wires"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

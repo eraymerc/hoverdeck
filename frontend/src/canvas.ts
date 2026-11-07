@@ -19,7 +19,14 @@
  */
 
 import { iconSvg, groundSymbol, symbolOf, symbolBody } from './icons';
-import type { SafeSheet as Sheet, SafeBlock as Block, Signal, SymbolDef } from './types';
+import {
+  autoRoute, reconcile, junctions, bends, labelAnchor, sameDrawing, snap, stubVec,
+  moveSegment, moveCorner, splitAt, removePoint, dragEnd,
+  type Seg, type Pt, type Terminal,
+} from './wires';
+import type { SafeSheet as Sheet, SafeBlock as Block, SafeNet as Net, Signal, SymbolDef } from './types';
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
 
 const BLOCK_W = 152;
 const BLOCK_MIN_H = 76;
@@ -38,8 +45,10 @@ export interface CanvasHandlers {
   onOpenBlock(block: Block): void;
   onMoveBlock(id: string, x: number, y: number): void;
   onMoveSignal(name: string, x: number, y: number): void;
-  onMoveNetTrunk(net: string, x: number, dy: number): void;
-  onMoveLeg(net: string, legKey: string, dy: number): void;
+  /** A net's edited drawing to save, or null to return it to automatic routing. */
+  onSetNetWires(net: string, wires: Seg[] | null): void;
+  /** The same, for a logic signal's links. */
+  onSetSignalWires(signal: string, wires: Seg[] | null): void;
   onDropCatalog(payload: string, x: number, y: number): void;
 }
 
@@ -57,6 +66,20 @@ interface Geom {
 
 type Dir = PinGeom['dir'];
 
+/** Where a signal's links leave its chip: the middle of its bottom edge. */
+function chipAnchor(c: { x: number; y: number; w: number; h: number }): Pt {
+  return [Math.round(c.x + c.w / 2), c.y + c.h];
+}
+
+/** Where a signal's link meets a block: the middle of its top edge. */
+function linkAnchor(g: { x: number; y: number; w: number }): Pt {
+  return [Math.round(g.x + g.w / 2), g.y];
+}
+
+/** What a wire belongs to: an electrical net, or a logic signal's links. */
+type WireKind = 'net' | 'sig';
+const wireKey = (kind: WireKind, name: string) => `${kind}:${name}`;
+
 interface PinGeom {
   index: number;
   name: string;
@@ -68,21 +91,6 @@ interface PinGeom {
   blockId: string;
   /** True for a dotted element reference (CCCS/CCVS's "sense" pin) — no wire. */
   ref: boolean;
-}
-
-/** "blockID:pinIndex" — must match hvr.LegKey on the Go side exactly. */
-function legKeyOf(p: PinGeom): string {
-  return `${p.blockId}:${p.index}`;
-}
-
-/** Unit vector a pin's stub leaves along. */
-function stubVec(dir: Dir): [number, number] {
-  switch (dir) {
-    case 'left': return [-1, 0];
-    case 'right': return [1, 0];
-    case 'up': return [0, -1];
-    default: return [0, 1];
-  }
 }
 
 function vecDir(x: number, y: number): Dir {
@@ -125,6 +133,8 @@ export class Canvas {
   private scale = 1;
 
   private geoms = new Map<string, Geom>();
+  /** Each wire's segments as last drawn, by wireKey — what an edit starts from. */
+  private drawn = new Map<string, Seg[]>();
   private chipGeoms = new Map<string, { x: number; y: number; w: number; h: number; sig: Signal }>();
 
   selectedBlock: string | null = null;
@@ -144,10 +154,6 @@ export class Canvas {
             <pattern id="grid" width="${GRID}" height="${GRID}" patternUnits="userSpaceOnUse">
               <circle cx="1" cy="1" r="1" fill="var(--canvas-grid)"/>
             </pattern>
-            <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4"
-                    markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-              <path d="M0 1 L7 4 L0 7 z" fill="var(--signal)"/>
-            </marker>
           </defs>
           <rect class="grid-bg" width="100%" height="100%" fill="url(#grid)"/>
           <g class="root"></g>
@@ -255,7 +261,7 @@ export class Canvas {
     this.svg.addEventListener('pointerdown', (e) => {
       const target = e.target as Element;
       if (target.closest('.block') || target.closest('.chip') ||
-          target.closest('[data-trunk]') || target.closest('[data-trunk-y]')) return;
+          target.closest('[data-seg]') || target.closest('[data-pt]') || target.closest('.wire-menu')) return;
 
       // Clicking empty canvas clears the selection.
       if (!target.closest('.net-label') && !target.closest('.pin-hit')) {
@@ -323,18 +329,23 @@ export class Canvas {
   }
 
   /** Re-applies selection/highlight classes without rebuilding the DOM. */
-  private paintSelection() {
-    this.root.querySelectorAll('.block').forEach((el) =>
+  /**
+   * Re-applies selection/highlight classes. Scoped to one freshly redrawn
+   * group during a drag, where walking the whole diagram on every pointer
+   * move would cost more than the redraw itself.
+   */
+  private paintSelection(scope: ParentNode = this.root) {
+    scope.querySelectorAll('.block').forEach((el) =>
       el.classList.toggle('sel', (el as SVGElement).dataset.id === this.selectedBlock));
-    this.root.querySelectorAll('.chip').forEach((el) =>
+    scope.querySelectorAll('.chip').forEach((el) =>
       el.classList.toggle('sel', (el as SVGElement).dataset.name === this.selectedSignal));
 
     const hot = this.hotNet ?? this.selectedNet;
-    this.root.querySelectorAll('[data-net]').forEach((el) => {
+    scope.querySelectorAll('[data-net]').forEach((el) => {
       const on = (el as SVGElement).dataset.net === hot;
       el.classList.toggle('hot', on);
     });
-    this.root.querySelectorAll('[data-sig]').forEach((el) => {
+    scope.querySelectorAll('[data-sig]').forEach((el) => {
       const on = (el as SVGElement).dataset.sig === this.selectedSignal;
       el.classList.toggle('hot', on);
     });
@@ -461,6 +472,7 @@ export class Canvas {
   // ── Render ────────────────────────────────────────────────────────────
 
   render(sheet: Sheet | null, refit = false) {
+    this.lite = false; // a full render is always a full drawing
     this.sheet = sheet;
     if (!sheet) {
       this.root.innerHTML = '';
@@ -470,8 +482,10 @@ export class Canvas {
 
     const parts: string[] = [];
 
-    parts.push(this.renderNets(sheet));
-    parts.push(this.renderSignalLinks(sheet));
+    // Nets and signal links each get a layer of their own, so a drag can
+    // redraw just the wiring it affects instead of the whole diagram.
+    parts.push(`<g class="layer-nets">${this.renderNets(sheet)}</g>`);
+    parts.push(`<g class="layer-slinks">${this.renderSignalLinks(sheet)}</g>`);
     parts.push(this.renderChips(sheet));
     parts.push(this.renderBlocks(sheet));
 
@@ -489,147 +503,253 @@ export class Canvas {
   }
 
   private renderNets(sheet: Sheet): string {
+    return sheet.nets.map((net) => this.netGroup(net)).join('');
+  }
+
+  /** One net's wiring in its own group, so a drag can redraw just that net. */
+  private netGroup(net: Net): string {
+    return `<g class="netg" data-netg="${esc(net.name)}">${this.renderNet(net)}</g>`;
+  }
+
+  private renderNet(net: Net): string {
     const out: string[] = [];
+    const pins = this.pinsOfNet(net.name);
+    if (pins.length === 0) return '';
 
-    for (const net of sheet.nets) {
-      const pins = this.pinsOfNet(net.name);
-      if (pins.length === 0) continue;
-
-      // Ground: a local terminal per pin, never a routed net.
-      if (net.isGround) {
-        for (const p of pins) {
-          out.push(`<g data-net="gnd">${groundSymbol(p.x, p.y, p.dir)}</g>`);
-        }
-        continue;
+    // Ground: a local terminal per pin, never a routed net.
+    if (net.isGround) {
+      for (const p of pins) {
+        out.push(`<g data-net="gnd">${groundSymbol(p.x, p.y, p.dir)}</g>`);
       }
+      return out.join('');
+    }
 
-      // A net with a single pin still gets a stub + label so an unconnected
-      // or boundary-only node is visible rather than silently absent.
-      if (pins.length === 1) {
-        const p = pins[0];
-        const [vx, vy] = stubVec(p.dir);
-        const ex = p.x + vx * PIN_STUB;
-        const ey = p.y + vy * PIN_STUB;
-        out.push(`<path class="wire" data-net="${esc(net.name)}" d="M${p.x} ${p.y} L${ex} ${ey}"/>`);
-        out.push(this.netLabel(net.name, ex + (vx < 0 ? -4 : 4), ey - 6, vx < 0 ? 'end' : 'start'));
-        continue;
+    // A net with a single pin still gets a stub + label so an unconnected
+    // or boundary-only node is visible rather than silently absent.
+    if (pins.length === 1) {
+      const p = pins[0];
+      const [vx, vy] = stubVec(p.dir);
+      const ex = p.x + vx * PIN_STUB;
+      const ey = p.y + vy * PIN_STUB;
+      out.push(`<path class="wire" data-net="${esc(net.name)}" d="M${p.x} ${p.y} L${ex} ${ey}"/>`);
+      out.push(this.netLabel(net.name, ex + (vx < 0 ? -4 : 4), ey - 6, vx < 0 ? 'end' : 'start'));
+      return out.join('');
+    }
+
+    // Everything else is drawn from segments: the saved drawing if the net
+    // has been edited — brought up to date with where its pins are now — or
+    // the automatic route. They are kept for the interactions, which edit
+    // exactly what is on screen.
+    const segs = this.segmentsOf(net, pins);
+    this.drawn.set(wireKey('net', net.name), segs);
+    const pinPts = pins.map((p) => [p.x, p.y] as Pt);
+    out.push(this.wireMarkup('net', net.name, segs, pinPts));
+    const at = labelAnchor(segs, pinPts);
+    if (at) out.push(this.netLabel(net.name, at[0] + 5, at[1] - 5, 'start'));
+    return out.join('');
+  }
+
+  /**
+   * The drawing of a wire — a net, or a signal's links — with everything
+   * needed to edit it. Grips go over every wire: each is the wide, invisible
+   * stroke a drag actually lands on, and shows a halo on hover so it is clear
+   * which segment will move. Bends get a handle; junctions a dot.
+   */
+  private wireMarkup(kind: WireKind, name: string, segs: Seg[], pins: Pt[]): string {
+    const out: string[] = [];
+    const n = esc(name);
+    const own = kind === 'net' ? `data-net="${n}"` : `data-sig="${n}"`;
+    const what = kind === 'net' ? n : `${n} (signal)`;
+    for (const s of segs) {
+      out.push(`<path class="${kind === 'net' ? 'wire' : 'slink'}" ${own} d="M${s[0]} ${s[1]} L${s[2]} ${s[3]}"/>`);
+    }
+    if (this.lite) {
+      for (const [x, y] of junctions(segs, pins)) {
+        out.push(`<circle class="junction${kind === 'sig' ? ' sig-junction' : ''}" ${own} cx="${x}" cy="${y}" r="3"/>`);
       }
-
-      // Routing channel: pinned by the user if they have dragged this wire,
-      // otherwise the mean of the pins' stub ends. dy lifts the horizontal
-      // legs off whatever they were crossing.
-      const stubEnds = pins.map((p) => {
-        const [vx, vy] = stubVec(p.dir);
-        return { x: p.x + vx * PIN_STUB, y: p.y + vy * PIN_STUB, dir: p.dir, pin: p };
-      });
-      const auto = Math.round(stubEnds.reduce((a, s) => a + s.x, 0) / stubEnds.length);
-      const trunkX = net.hasTrunk ? net.trunkX : auto;
-      const dy = net.trunkDY || 0;
-
-      // First pass: work out each leg's path without emitting anything yet.
-      // The trunk's own vertical extent depends on every leg's join point,
-      // so its path can't be built until all of them are known.
-      //
-      // Each leg's own offset is dy (the net's bulk shift) PLUS its own
-      // legDY entry — the two are independent, additive knobs: dragging the
-      // trunk moves every leg together, dragging one leg nudges only that
-      // leg on top of wherever the trunk already put it. Without a per-leg
-      // term here, every leg would be forced to share the exact same
-      // vertical offset, and dragging any one of them would inevitably drag
-      // all the others along with it — no way to move just one connection.
-      const legPaths: { d: string; legKey: string; pinned: boolean }[] = [];
-      const joinYs: number[] = [];
-      for (const s of stubEnds) {
-        const p = s.pin;
-        const legKey = legKeyOf(p);
-        const legDy = net.legDY[legKey] || 0;
-        const totalDy = dy + legDy;
-        const pinned = legDy !== 0;
-
-        const horizontal = s.dir === 'left' || s.dir === 'right';
-        const jointY = s.y + totalDy;
-
-        // With no manual offset a side pin runs straight across, unless the
-        // channel sits behind it — in which case route around the block
-        // rather than drawing back over it.
-        const doublesBack = horizontal && totalDy === 0 &&
-          ((s.dir === 'right' && trunkX < s.x) || (s.dir === 'left' && trunkX > s.x));
-
-        if (horizontal && totalDy === 0 && !doublesBack) {
-          legPaths.push({ d: `M${p.x} ${p.y} H${trunkX}`, legKey, pinned });
-          joinYs.push(p.y);
-          continue;
-        }
-        if (doublesBack) {
-          const g = this.geomOfPin(p);
-          const above = g ? p.y < g.y + g.h / 2 : true;
-          const detourY = g ? (above ? g.y - 14 : g.y + g.h + 14) : p.y - 14;
-          legPaths.push({ d: `M${p.x} ${p.y} H${s.x} V${detourY} H${trunkX}`, legKey, pinned });
-          joinYs.push(detourY);
-          continue;
-        }
-
-        // General case: out along the stub, vertically to the joint, then
-        // across to the channel. Always orthogonal for any pin direction.
-        legPaths.push({ d: `M${p.x} ${p.y} L${s.x} ${s.y} V${jointY} H${trunkX}`, legKey, pinned });
-        joinYs.push(jointY);
-      }
-
-      const minY = Math.min(...joinYs);
-      const maxY = Math.max(...joinYs);
-
-      // Trunk is drawn — and its grab handle wired — before any leg, so
-      // every leg (painted after, later in the DOM) sits on top of it for
-      // hit-testing. This matters whenever a leg runs parallel to and
-      // coincides with the trunk, which happens whenever a pin's stub
-      // already lines up with trunkX (any straight-through vertical pin,
-      // for instance): without this ordering the trunk's invisible grip
-      // would sit on top along that entire shared run, not just at a
-      // corner, and grabbing anywhere on what looks like "just that wire"
-      // would always drag the whole net's trunk instead.
-      if (maxY > minY) {
-        out.push(
-          `<path class="trunk-grip" data-trunk="${esc(net.name)}" d="M${trunkX} ${minY} V${maxY}"/>` +
-          `<path class="wire trunk${net.hasTrunk ? ' pinned' : ''}" data-net="${esc(net.name)}" ` +
-          `data-trunk="${esc(net.name)}" d="M${trunkX} ${minY} V${maxY}"/>`,
-        );
-      }
-      for (const leg of legPaths) {
-        out.push(
-          `<path class="trunk-grip-y" data-trunk-y="${esc(net.name)}" data-leg="${esc(leg.legKey)}" d="${leg.d}"/>` +
-          `<path class="wire${leg.pinned ? ' pinned' : ''}" data-net="${esc(net.name)}" ` +
-          `data-trunk-y="${esc(net.name)}" data-leg="${esc(leg.legKey)}" d="${leg.d}"/>`,
-        );
-      }
-      // Junction dots wherever three or more segments meet.
-      if (pins.length > 2) {
-        for (const y of joinYs) {
-          if (y > minY && y < maxY) {
-            out.push(`<circle class="junction" data-net="${esc(net.name)}" cx="${trunkX}" cy="${y}" r="3"/>`);
-          }
-        }
-      }
-      out.push(this.netLabel(net.name, trunkX + 5, minY - 5, 'start'));
+      return out.join('');
+    }
+    segs.forEach((s, i) => {
+      out.push(
+        `<path class="seg-grip ${s[1] === s[3] ? 'h' : 'v'} ${kind}" ${own} data-wk="${kind}" data-wn="${n}" ` +
+        `data-seg="${i}" d="M${s[0]} ${s[1]} L${s[2]} ${s[3]}"><title>${what}: drag to move this segment ` +
+        `· double-click to add a bend · right-click for more</title></path>`,
+      );
+    });
+    for (const [x, y] of bends(segs, pins)) {
+      out.push(
+        `<rect class="bend-grip ${kind}" ${own} data-wk="${kind}" data-wn="${n}" data-pt="${x},${y}" ` +
+        `x="${x - 5}" y="${y - 5}" width="10" height="10"><title>${what}: drag to move this bend ` +
+        `· double-click to remove it</title></rect>`,
+      );
+    }
+    for (const [x, y] of junctions(segs, pins)) {
+      out.push(`<circle class="junction${kind === 'sig' ? ' sig-junction' : ''}" ${own} cx="${x}" cy="${y}" r="3"/>`);
     }
     return out.join('');
   }
 
-  /** The x position automatic routing would choose for a net. */
-  private autoTrunkX(name: string): number {
-    const pins = this.pinsOfNet(name);
-    if (!pins.length) return 0;
-    // Must match the channel renderNets computes, or a trunk jumps sideways
-    // the moment it is grabbed: an up/down pin's stub ends at its own x.
-    const stubs = pins.map((p) => p.x + stubVec(p.dir)[0] * PIN_STUB);
-    return Math.round(stubs.reduce((a, b) => a + b, 0) / stubs.length);
+  /**
+   * The segments a net is drawn with: its saved drawing reconciled with the
+   * pins as they are now, or the automatic route if it was never edited.
+   */
+  private segmentsOf(net: Net, pins: PinGeom[]): Seg[] {
+    const terms: Terminal[] = pins.map((p) => {
+      const g = this.geoms.get(p.blockId);
+      return { x: p.x, y: p.y, dir: p.dir, blockId: p.blockId, box: g ? { x: g.x, y: g.y, w: g.w, h: g.h } : null };
+    });
+    const clear = (x: number, y1: number, y2: number, own: string) => this.columnClear(x, y1, y2, own);
+    return net.wires ? reconcile(net.wires, terms, clear) : autoRoute(terms, clear);
   }
 
-  private geomOfPin(p: PinGeom): Geom | undefined {
-    let found: Geom | undefined;
-    this.geoms.forEach((g) => {
-      if (g.pins.includes(p)) found = g;
-    });
-    return found;
+  /**
+   * Redraws only the named nets, or signals' links. Every pointer move of a
+   * drag lands here, so it replaces just those groups and wires their
+   * listeners, rather than rebuilding the diagram and every listener in it.
+   */
+  private redrawWires(kind: WireKind, names: Iterable<string>) {
+    const sheet = this.sheet;
+    const layer = this.root.querySelector(kind === 'net' ? '.layer-nets' : '.layer-slinks');
+    if (!sheet || !layer) return;
+    const want = new Set(names);
+    for (const el of Array.from(layer.children) as SVGGElement[]) {
+      const name = kind === 'net' ? el.dataset.netg : el.dataset.sigg;
+      if (name === undefined || !want.has(name)) continue;
+      let markup: string | null = null;
+      if (kind === 'net') {
+        const net = sheet.nets.find((x) => x.name === name);
+        if (net) markup = this.netGroup(net);
+      } else {
+        const sig = sheet.signals.find((x) => x.name === name);
+        if (sig) markup = this.sigGroup(sig);
+      }
+      if (markup === null) continue;
+      const tmp = document.createElementNS(SVG_NS, 'g');
+      tmp.innerHTML = markup;
+      const fresh = tmp.firstElementChild;
+      if (!fresh) continue;
+      el.replaceWith(fresh);
+      if (!this.lite) this.wireNetEvents(fresh);
+      this.paintSelection(fresh);
+    }
+  }
+
+  private redrawNets(names: Iterable<string>) {
+    this.redrawWires('net', names);
+  }
+
+  /** The signals a block reads or writes through its logic ports. */
+  private signalsOf(b: Block): string[] {
+    return b.logic.map((a) => a.text.trim()).filter((n) => this.chipGeoms.has(n));
+  }
+
+  /**
+   * Edited wires attached to whatever is being dragged: each one's drawing
+   * when the drag began, and its ends there, with how to find where each end
+   * is now. Every step of the drag stretches them from that starting point
+   * (see dragEnd), so they keep their shape instead of being re-routed.
+   */
+  private rubber: { kind: WireKind; name: string; base: Seg[]; ends: { from: Pt; now: () => Pt | null }[] }[] = [];
+
+  /**
+   * True while something is being dragged. Wires redrawn then are drawn bare
+   * — no grips, bend handles, tooltips or listeners — since none of that can
+   * be used mid-drag, and building it for every wire on every grid step was
+   * most of a step's cost. The drop draws them in full again.
+   */
+  private lite = false;
+
+  /** The edited nets and signal links on a block, ready to stretch as it moves. */
+  private grabBlockWires(b: Block) {
+    this.rubber = [];
+    const g = this.geoms.get(b.id);
+    if (!g) return;
+    const nets = new Map<string, number[]>();
+    for (const p of g.pins) if (!p.ref) nets.set(p.net, [...(nets.get(p.net) ?? []), p.index]);
+    for (const [net, idx] of nets) {
+      this.grab('net', net, idx.map((i) => {
+        const p0 = g.pins.find((p) => p.index === i)!;
+        return {
+          from: [p0.x, p0.y] as Pt,
+          now: () => {
+            const p = this.geoms.get(b.id)?.pins.find((q) => q.index === i);
+            return p ? [p.x, p.y] : null;
+          },
+        };
+      }));
+    }
+    for (const sig of new Set(this.signalsOf(b))) {
+      this.grab('sig', sig, [{
+        from: linkAnchor(g),
+        now: () => { const ng = this.geoms.get(b.id); return ng ? linkAnchor(ng) : null; },
+      }]);
+    }
+  }
+
+  /** A chip's edited links, ready to stretch as it moves. */
+  private grabChipWires(name: string) {
+    this.rubber = [];
+    const c = this.chipGeoms.get(name);
+    if (!c) return;
+    this.grab('sig', name, [{ from: chipAnchor(c), now: () => { const n = this.chipGeoms.get(name); return n ? chipAnchor(n) : null; } }]);
+  }
+
+  private grab(kind: WireKind, name: string, ends: { from: Pt; now: () => Pt | null }[]) {
+    const o = this.owner(kind, name);
+    const base = this.drawn.get(wireKey(kind, name));
+    if (o?.wires && base) this.rubber.push({ kind, name, base, ends });
+  }
+
+  /**
+   * Stretches every grabbed wire to where its ends are now. A wire that does
+   * not end where expected keeps its saved drawing, and drawing it reconciles
+   * it the old way — its branch re-routed.
+   */
+  private stretchGrabbed() {
+    for (const r of this.rubber) {
+      const fixed = this.fixedPoints(r.kind, r.name);
+      let segs: Seg[] | null = r.base;
+      for (const end of r.ends) {
+        const to = end.now();
+        if (segs && to) segs = dragEnd(segs, end.from, to, fixed);
+      }
+      const o = this.owner(r.kind, r.name);
+      if (o) o.wires = segs ?? r.base;
+    }
+  }
+
+  /** After a drop: saves the wires that were stretched, and lets go of them. */
+  private releaseGrabbed() {
+    for (const r of this.rubber) this.saveWires(r.kind, r.name);
+    this.rubber = [];
+  }
+
+  /**
+   * While a block is being dragged: puts it at (x, y) in the model and
+   * redraws the wires attached to it — nets and signal links — so they
+   * follow the block instead of waiting for the drop.
+   */
+  private previewBlockAt(b: Block, x: number, y: number) {
+    b.x = x;
+    b.y = y;
+    const g = this.symbolGeom(b) ?? this.boxGeom(b);
+    this.geoms.set(b.id, g);
+    this.stretchGrabbed();
+    this.redrawNets(g.pins.filter((p) => !p.ref).map((p) => p.net));
+    this.redrawWires('sig', this.signalsOf(b));
+  }
+
+  /**
+   * Whether a vertical wire at x between y1 and y2 stays clear of every
+   * block but `own` — the one the wire leaves from, which it runs away from.
+   */
+  private columnClear(x: number, y1: number, y2: number, own: string): boolean {
+    const top = Math.min(y1, y2), bottom = Math.max(y1, y2);
+    for (const g of this.geoms.values()) {
+      if (g.block.id === own) continue;
+      if (x > g.x - 2 && x < g.x + g.w + 2 && bottom > g.y && top < g.y + g.h) return false;
+    }
+    return true;
   }
 
   private netLabel(name: string, x: number, y: number, anchor: string): string {
@@ -637,34 +757,65 @@ export class Canvas {
            `x="${x}" y="${y}" text-anchor="${anchor}">${esc(name)}</text>`;
   }
 
-  /**
-   * Dashed links from a signal chip to every block that reads or writes it
-   * through a logic port. Direction comes from the module's declared
-   * input/output, so the arrow shows which way the value actually flows.
-   */
   private renderSignalLinks(sheet: Sheet): string {
-    const out: string[] = [];
-    for (const b of sheet.blocks) {
+    return sheet.signals.map((s) => this.sigGroup(s)).join('');
+  }
+
+  /** One signal's links in their own group, so a drag can redraw just them. */
+  private sigGroup(sig: Signal): string {
+    return `<g class="sigg" data-sigg="${esc(sig.name)}">${this.renderSignal(sig)}</g>`;
+  }
+
+  /**
+   * Where a signal's links end: the bottom of its chip, and the top of every
+   * block that reads or writes it through a logic port. `reads` are the ends
+   * at blocks that take the value in — they get an arrowhead, so the drawing
+   * shows which way the value flows (direction comes from the module's
+   * declared input/output).
+   */
+  private signalTerminals(name: string): { terms: Terminal[]; reads: Pt[] } {
+    const c = this.chipGeoms.get(name);
+    if (!c || !this.sheet) return { terms: [], reads: [] };
+    const [chx, chy] = chipAnchor(c);
+    const terms: Terminal[] = [{ x: chx, y: chy, dir: 'down', blockId: '', box: null }];
+    const reads: Pt[] = [];
+    const seen = new Set<string>();
+    for (const b of this.sheet.blocks) {
       const g = this.geoms.get(b.id);
       if (!g) continue;
       b.logic.forEach((arg, i) => {
-        const chip = this.chipGeoms.get(arg.text.trim());
-        if (!chip) return;
-
-        const dirOut = isOutput(b, i);
-        const cx = chip.x + chip.w / 2;
-        const cy = chip.y + chip.h;
-        const bx = g.x + g.w / 2;
-        const by = g.y;
-        const midY = (cy + by) / 2;
-        const d = `M${cx} ${cy} V${midY} H${bx} V${by}`;
-        const marker = dirOut ? '' : ' marker-end="url(#arrow)"';
-        out.push(
-          `<path class="slink" data-sig="${esc(arg.text.trim())}" data-block="${esc(b.id)}" d="${d}"${marker}/>`,
-        );
+        if (arg.text.trim() !== name) return;
+        const pt = linkAnchor(g);
+        const k = pt.join();
+        if (!seen.has(k)) {
+          seen.add(k);
+          terms.push({ x: pt[0], y: pt[1], dir: 'up', blockId: b.id, box: { x: g.x, y: g.y, w: g.w, h: g.h } });
+        }
+        if (!isOutput(b, i) && !reads.some((r) => r.join() === k)) reads.push(pt);
       });
     }
-    return out.join('');
+    return { terms, reads };
+  }
+
+  /**
+   * A signal's links, drawn and edited exactly like a net: routed
+   * automatically until edited, then saved, with only a moved block's branch
+   * ever re-routed.
+   */
+  private renderSignal(sig: Signal): string {
+    const key = wireKey('sig', sig.name);
+    const { terms, reads } = this.signalTerminals(sig.name);
+    if (terms.length < 2) {
+      this.drawn.delete(key);
+      return '';
+    }
+    const clear = (x: number, y1: number, y2: number, own: string) => this.columnClear(x, y1, y2, own);
+    const segs = sig.wires ? reconcile(sig.wires, terms, clear) : autoRoute(terms, clear);
+    this.drawn.set(key, segs);
+    const n = esc(sig.name);
+    const arrows = reads.map(([x, y]) =>
+      `<polygon class="slink-arrow" data-sig="${n}" points="${x - 4},${y - 7} ${x + 4},${y - 7} ${x},${y}"/>`);
+    return this.wireMarkup('sig', sig.name, segs, terms.map((t) => [t.x, t.y] as Pt)) + arrows.join('');
   }
 
   private renderChips(sheet: Sheet): string {
@@ -820,103 +971,254 @@ export class Canvas {
 
   // ── Events on rendered nodes ──────────────────────────────────────────
 
-  private wireEvents() {
-    // Wire re-routing: drag a net's trunk sideways to pull it clear of
-    // whatever it overlaps. The listeners live on window rather than on the
-    // path, because each move re-renders the diagram and would otherwise
-    // destroy the element holding the pointer capture mid-drag.
-    this.root.querySelectorAll('[data-trunk]').forEach((el) => {
+  /**
+   * Two clicks on the same handle within a short interval. Detected by hand
+   * rather than with `dblclick`: the handles' pointerdown calls
+   * preventDefault, which is allowed to suppress the compatibility mouse
+   * events a native dblclick is built from.
+   */
+  private lastTap = { key: '', t: 0 };
+  private isDoubleTap(key: string): boolean {
+    const now = performance.now();
+    const dbl = this.lastTap.key === key && now - this.lastTap.t < 400;
+    this.lastTap = dbl ? { key: '', t: 0 } : { key, t: now };
+    return dbl;
+  }
+
+  /** The net or signal a wire belongs to — whatever holds its `wires`. */
+  private owner(kind: WireKind, name: string): Net | Signal | undefined {
+    return kind === 'net'
+      ? this.sheet?.nets.find((x) => x.name === name)
+      : this.sheet?.signals.find((x) => x.name === name);
+  }
+
+  /** The points no edit of this wire may move: a net's pins, a signal's ends. */
+  private fixedPoints(kind: WireKind, name: string): Pt[] {
+    return kind === 'net'
+      ? this.pinsOfNet(name).map((p) => [p.x, p.y] as Pt)
+      : this.signalTerminals(name).terms.map((t) => [t.x, t.y] as Pt);
+  }
+
+  private selectWire(kind: WireKind, name: string) {
+    if (kind === 'net') this.select(null, name, null);
+    else this.select(null, null, name);
+  }
+
+  /** Saves a wire's drawing as it now is — or, when null, its return to automatic. */
+  private saveWires(kind: WireKind, name: string) {
+    const o = this.owner(kind, name);
+    if (!o) return;
+    if (kind === 'net') this.h.onSetNetWires(name, o.wires);
+    else this.h.onSetSignalWires(name, o.wires);
+  }
+
+  /**
+   * After something moved: an edited wire whose branch to it was re-routed
+   * when it was drawn is saved as drawn, so the sidecar holds what is on
+   * screen rather than re-deriving it every time.
+   */
+  private saveIfReconciled(kind: WireKind, name: string) {
+    const o = this.owner(kind, name);
+    const drawn = this.drawn.get(wireKey(kind, name));
+    if (o?.wires && drawn && !sameDrawing(o.wires, drawn)) {
+      o.wires = drawn;
+      this.saveWires(kind, name);
+    }
+  }
+
+  private saveReconciled(b: Block) {
+    for (const p of b.pins) if (!p.ref) this.saveIfReconciled('net', p.net);
+    for (const s of this.signalsOf(b)) this.saveIfReconciled('sig', s);
+  }
+
+  private closeMenu: (() => void) | null = null;
+
+  /** Right-click on a wire: select what it belongs to, or return it to automatic routing. */
+  private openWireMenu(kind: WireKind, name: string, e: MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    this.closeMenu?.();
+    const o = this.owner(kind, name);
+    const wrap = this.host.querySelector('.canvas-wrap') as HTMLElement | null;
+    if (!o || !wrap) return;
+
+    const r = wrap.getBoundingClientRect();
+    const m = document.createElement('div');
+    m.className = 'wire-menu';
+    m.style.left = `${e.clientX - r.left}px`;
+    m.style.top = `${e.clientY - r.top}px`;
+    m.innerHTML =
+      `<div class="wire-menu-title">${esc(name)}${kind === 'sig' ? ' (signal)' : ''}` +
+      `${o.wires ? ' · edited' : ' · automatic'}</div>` +
+      `<button data-act="select">Select ${kind === 'net' ? 'net' : 'signal'}</button>` +
+      `<button data-act="auto"${o.wires ? '' : ' disabled'}>Reset to automatic routing</button>`;
+    wrap.appendChild(m);
+
+    const close = () => {
+      m.remove();
+      document.removeEventListener('pointerdown', outside, true);
+      document.removeEventListener('keydown', onKey, true);
+      this.closeMenu = null;
+    };
+    const outside = (ev: Event) => { if (!m.contains(ev.target as Node)) close(); };
+    const onKey = (ev: KeyboardEvent) => { if (ev.key === 'Escape') close(); };
+    document.addEventListener('pointerdown', outside, true);
+    document.addEventListener('keydown', onKey, true);
+    this.closeMenu = close;
+
+    m.querySelector('[data-act="select"]')!.addEventListener('click', () => {
+      close();
+      this.selectWire(kind, name);
+    });
+    m.querySelector('[data-act="auto"]')!.addEventListener('click', () => {
+      close();
+      o.wires = null;
+      this.redrawWires(kind, [name]);
+      this.saveWires(kind, name);
+    });
+  }
+
+  /**
+   * Listeners for wiring: segment and bend edits, net hover, net labels. Scoped
+   * so that a single redrawn net group can be wired on its own.
+   */
+  private wireNetEvents(scope: Element) {
+    // Segments: drag to move one perpendicular to itself — a horizontal one
+    // up or down, a vertical one sideways — with the wires around it
+    // stretching to follow. Double-click to split it there, leaving a point
+    // either half can be bent at. Every edit starts from exactly what is on
+    // screen and freezes the whole wire: from then on its drawing is saved,
+    // and only a moved block's own branch is ever re-routed. Nets and
+    // signal links work the same way.
+    //
+    // The listeners live on window rather than on the grip, because each
+    // move redraws the wire and replaces the element.
+    scope.querySelectorAll('[data-seg]').forEach((el) => {
+      const kind = (el as SVGElement).dataset.wk as WireKind;
+      const name = (el as SVGElement).dataset.wn!;
+      const idx = Number((el as SVGElement).dataset.seg);
       el.addEventListener('pointerdown', (ev) => {
         const e = ev as PointerEvent;
+        if (e.button !== 0) return;
         e.stopPropagation();
         e.preventDefault();
-        const name = (el as SVGElement).dataset.trunk!;
-        const net = this.sheet?.nets.find((n) => n.name === name);
-        if (!net) return;
-
-        const startX = e.clientX;
-        const startY = e.clientY;
-        const originX = net.hasTrunk ? net.trunkX : this.autoTrunkX(name);
-        const originDY = net.trunkDY || 0;
+        const o = this.owner(kind, name);
+        const base = this.drawn.get(wireKey(kind, name));
+        if (!o || !base?.[idx]) return;
+        const fixed = this.fixedPoints(kind, name);
+        const horizontal = base[idx][1] === base[idx][3];
+        const startX = e.clientX, startY = e.clientY;
         let moved = false;
+        let last = 0;
 
-        // Both axes: horizontal movement slides the vertical channel, vertical
-        // movement lifts the horizontal legs that feed into it.
         const move = (me: PointerEvent) => {
           const dx = (me.clientX - startX) / this.scale;
           const dy = (me.clientY - startY) / this.scale;
-          if (!moved && Math.abs(dx) < 2 && Math.abs(dy) < 2) return;
+          if (!moved && Math.abs(dx) < 3 && Math.abs(dy) < 3) return;
           moved = true;
-          net.trunkX = Math.round((originX + dx) / 8) * 8;
-          net.trunkDY = Math.round((originDY + dy) / 8) * 8;
-          net.hasTrunk = true;
-          this.render(this.sheet);
+          this.lite = true;
+          // Pointer events come far faster than the grid steps; redraw only
+          // when the snapped position actually changes.
+          const d = snap(horizontal ? dy : dx);
+          if (d === last) return;
+          last = d;
+          o.wires = moveSegment(base, idx, d, fixed);
+          this.redrawWires(kind, [name]);
         };
-        const up = () => {
+        const up = (ue: PointerEvent) => {
           window.removeEventListener('pointermove', move);
           window.removeEventListener('pointerup', up);
-          if (moved) this.h.onMoveNetTrunk(name, net.trunkX, net.trunkDY);
-          else this.select(null, name, null);
+          window.removeEventListener('pointercancel', up);
+          if (moved) {
+            this.lite = false;
+            this.redrawWires(kind, [name]);
+            this.saveWires(kind, name);
+          } else if (this.isDoubleTap(`seg:${kind}:${name}:${idx}`)) {
+            const p = this.toWorld(ue.clientX, ue.clientY);
+            o.wires = splitAt(base, idx, p.x, p.y, fixed);
+            this.redrawWires(kind, [name]);
+            this.saveWires(kind, name);
+          } else {
+            this.selectWire(kind, name);
+          }
         };
         window.addEventListener('pointermove', move);
         window.addEventListener('pointerup', up);
+        window.addEventListener('pointercancel', up);
       });
+      el.addEventListener('contextmenu', (ev) => this.openWireMenu(kind, name, ev as MouseEvent));
     });
 
-    // Horizontal leg re-routing: drag a leg vertically to lift it clear of
-    // whatever it crosses. A leg's horizontal position is pinned to the pin
-    // it comes from, so only Y dragging means anything here — hence a
-    // separate handler with an ns-resize cursor rather than reusing the
-    // trunk's 2-axis one.
-    //
-    // This adjusts the LEG's own offset (net.legDY[legKey]), not the net's
-    // shared trunkDY — that is what keeps dragging one leg from dragging
-    // every other leg of the same net along with it. Dragging the trunk
-    // itself (the other handler, above) still moves every leg together, as
-    // a deliberate bulk shift; this one is the independent, single-leg move.
-    this.root.querySelectorAll('[data-trunk-y]').forEach((el) => {
+    // Bends: drag to move one in both directions; double-click to take it
+    // out, flattening its shorter side.
+    scope.querySelectorAll('[data-pt]').forEach((el) => {
+      const kind = (el as SVGElement).dataset.wk as WireKind;
+      const name = (el as SVGElement).dataset.wn!;
+      const pt = (el as SVGElement).dataset.pt!.split(',').map(Number) as Pt;
       el.addEventListener('pointerdown', (ev) => {
         const e = ev as PointerEvent;
+        if (e.button !== 0) return;
         e.stopPropagation();
         e.preventDefault();
-        const name = (el as SVGElement).dataset.trunkY!;
-        const legKey = (el as SVGElement).dataset.leg!;
-        const net = this.sheet?.nets.find((n) => n.name === name);
-        if (!net) return;
-
-        const startY = e.clientY;
-        const originDY = net.legDY[legKey] || 0;
+        const o = this.owner(kind, name);
+        const base = this.drawn.get(wireKey(kind, name));
+        if (!o || !base) return;
+        const fixed = this.fixedPoints(kind, name);
+        const startX = e.clientX, startY = e.clientY;
         let moved = false;
+        let last = '0,0';
 
         const move = (me: PointerEvent) => {
+          const dx = (me.clientX - startX) / this.scale;
           const dy = (me.clientY - startY) / this.scale;
-          if (!moved && Math.abs(dy) < 2) return;
+          if (!moved && Math.abs(dx) < 3 && Math.abs(dy) < 3) return;
           moved = true;
-          net.legDY = { ...net.legDY, [legKey]: Math.round((originDY + dy) / 8) * 8 };
-          this.render(this.sheet);
+          this.lite = true;
+          const sx = snap(dx), sy = snap(dy);
+          if (`${sx},${sy}` === last) return;
+          last = `${sx},${sy}`;
+          o.wires = moveCorner(base, pt, sx, sy, fixed);
+          this.redrawWires(kind, [name]);
         };
         const up = () => {
           window.removeEventListener('pointermove', move);
           window.removeEventListener('pointerup', up);
-          if (moved) this.h.onMoveLeg(name, legKey, net.legDY[legKey]);
-          else this.select(null, name, null);
+          window.removeEventListener('pointercancel', up);
+          if (moved) {
+            this.lite = false;
+            this.redrawWires(kind, [name]);
+            this.saveWires(kind, name);
+          } else if (this.isDoubleTap(`bend:${kind}:${name}:${pt}`)) {
+            o.wires = removePoint(base, pt, fixed);
+            this.redrawWires(kind, [name]);
+            this.saveWires(kind, name);
+          } else {
+            this.selectWire(kind, name);
+          }
         };
         window.addEventListener('pointermove', move);
         window.addEventListener('pointerup', up);
+        window.addEventListener('pointercancel', up);
       });
+      el.addEventListener('contextmenu', (ev) => this.openWireMenu(kind, name, ev as MouseEvent));
     });
 
     // Net hover/selection.
-    this.root.querySelectorAll('[data-net]').forEach((el) => {
+    scope.querySelectorAll('[data-net]').forEach((el) => {
       el.addEventListener('mouseenter', () => this.setHotNet((el as SVGElement).dataset.net!));
       el.addEventListener('mouseleave', () => this.setHotNet(null));
     });
-    this.root.querySelectorAll('[data-netlabel]').forEach((el) => {
+    scope.querySelectorAll('[data-netlabel]').forEach((el) => {
       el.addEventListener('click', (e) => {
         e.stopPropagation();
         this.select(null, (el as SVGElement).dataset.netlabel!, null);
       });
     });
+  }
+
+  private wireEvents() {
+    this.wireNetEvents(this.root);
+
     this.root.querySelectorAll('.pin-hit').forEach((el) => {
       el.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -940,6 +1242,7 @@ export class Canvas {
         dragging = true; moved = false;
         sx = e.clientX; sy = e.clientY;
         ox = c.x; oy = c.y;
+        this.grabChipWires(name);
         (el as SVGGElement).setPointerCapture(e.pointerId);
       });
 
@@ -950,7 +1253,14 @@ export class Canvas {
         const dy = (e.clientY - sy) / this.scale;
         if (Math.abs(dx) > 2 || Math.abs(dy) > 2) moved = true;
         if (!moved) return;
-        (el as SVGGElement).setAttribute('transform', `translate(${dx} ${dy})`);
+        const nx = snap(ox + dx), ny = snap(oy + dy);
+        if (nx === c.x && ny === c.y) return;
+        (el as SVGGElement).setAttribute('transform', `translate(${nx - ox} ${ny - oy})`);
+        // The dashed links to this chip follow it, stretching if edited.
+        this.lite = true;
+        c.x = nx; c.y = ny;
+        this.stretchGrabbed();
+        this.redrawWires('sig', [name]);
       });
 
       const finish = (ev: Event) => {
@@ -963,13 +1273,17 @@ export class Canvas {
           this.select(null, null, name);
           return;
         }
-        const nx = Math.round((ox + (e.clientX - sx) / this.scale) / 8) * 8;
-        const ny = Math.round((oy + (e.clientY - sy) / this.scale) / 8) * 8;
+        const nx = snap(ox + (e.clientX - sx) / this.scale);
+        const ny = snap(oy + (e.clientY - sy) / this.scale);
         c.x = nx; c.y = ny;
         c.sig.x = nx; c.sig.y = ny;
+        this.stretchGrabbed();
+        this.lite = false;
         (el as SVGGElement).setAttribute('transform', 'translate(0 0)');
         this.h.onMoveSignal(name, nx, ny);
         this.render(this.sheet);
+        this.releaseGrabbed();
+        this.saveIfReconciled('sig', name);
       };
       el.addEventListener('pointerup', finish);
       el.addEventListener('pointercancel', finish);
@@ -992,7 +1306,12 @@ export class Canvas {
         dragging = true;
         moved = false;
         sx = e.clientX; sy = e.clientY;
-        ox = g.x; oy = g.y;
+        // The block's saved position — NOT the geometry's bounding box. For a
+        // box the two coincide, but a symbol's position is its origin, inside
+        // the drawing, and starting from the box corner dropped every symbol
+        // up and left of where it was let go.
+        ox = g.block.x; oy = g.block.y;
+        this.grabBlockWires(g.block);
         (el as SVGGElement).setPointerCapture(e.pointerId);
       });
 
@@ -1003,8 +1322,15 @@ export class Canvas {
         const dy = (e.clientY - sy) / this.scale;
         if (Math.abs(dx) > 2 || Math.abs(dy) > 2) moved = true;
         if (!moved) return;
-        // Move only this group during the drag; nets are re-routed on drop.
-        (el as SVGGElement).setAttribute('transform', `translate(${dx} ${dy})`);
+        // The preview sits on the same grid the drop snaps to, so the block
+        // lands exactly where it was shown. The block's own markup is only
+        // translated; the wires attached to it are redrawn to follow it,
+        // once per grid step rather than once per pointer event.
+        const nx = snap(ox + dx), ny = snap(oy + dy);
+        if (nx === g.block.x && ny === g.block.y) return;
+        (el as SVGGElement).setAttribute('transform', `translate(${nx - ox} ${ny - oy})`);
+        this.lite = true;
+        this.previewBlockAt(g.block, nx, ny);
       });
 
       const finish = (ev: Event) => {
@@ -1019,13 +1345,15 @@ export class Canvas {
         }
         const dx = (e.clientX - sx) / this.scale;
         const dy = (e.clientY - sy) / this.scale;
-        const nx = Math.round((ox + dx) / 8) * 8;
-        const ny = Math.round((oy + dy) / 8) * 8;
-        g.block.x = nx;
-        g.block.y = ny;
+        const nx = snap(ox + dx);
+        const ny = snap(oy + dy);
+        this.previewBlockAt(g.block, nx, ny); // final stretch, at exactly the drop position
+        this.lite = false;
         (el as SVGGElement).setAttribute('transform', 'translate(0 0)');
         this.h.onMoveBlock(id, nx, ny);
         this.render(this.sheet);
+        this.releaseGrabbed();
+        this.saveReconciled(g.block);
       };
       el.addEventListener('pointerup', finish);
       el.addEventListener('pointercancel', finish);

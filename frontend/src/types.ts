@@ -90,16 +90,12 @@ export interface Net {
   declLine: number;
   isBoundary: boolean;
   pins: NetPin[] | null;
-  trunkX: number;
-  trunkDY: number;
-  hasTrunk: boolean;
   color?: string;
-  // Per-leg vertical offset, keyed by "blockID:pinIndex" (see hvr.LegKey),
-  // added on top of trunkDY so one connection can move independently of
-  // the net's other legs. Nullable per the same nil-map-marshals-to-null
-  // rule as the slice fields elsewhere in this file — normalizeSheet fills
-  // in {} for the null case, same treatment as everything else here.
-  legDY: Record<string, number> | null;
+  /**
+   * The net's hand-edited drawing — horizontal and vertical segments,
+   * [x1, y1, x2, y2] — or null while it is routed automatically. See wires.ts.
+   */
+  wires: [number, number, number, number][] | null;
 }
 
 export interface Signal {
@@ -111,6 +107,8 @@ export interface Signal {
   span: Span;
   x: number;
   y: number;
+  /** Hand-edited drawing of this signal's links, or null while automatic — as Net.wires. */
+  wires: [number, number, number, number][] | null;
 }
 
 /**
@@ -148,7 +146,7 @@ export type SafeBlock = Omit<Block, 'params' | 'logic' | 'pins' | 'logicPorts'> 
   logicPorts: LogicPort[];
 };
 
-export type SafeNet = Omit<Net, 'pins' | 'legDY'> & { pins: NetPin[]; legDY: Record<string, number> };
+export type SafeNet = Omit<Net, 'pins'> & { pins: NetPin[] };
 
 export type SafeSheet = Omit<Sheet,
   'blocks' | 'nets' | 'signals' | 'physPorts' | 'logicPorts' | 'errors'> & {
@@ -171,8 +169,8 @@ export function normalizeSheet(s: Sheet): SafeSheet {
       pins: b.pins ?? [],
       logicPorts: b.logicPorts ?? [],
     })),
-    nets: (s.nets ?? []).map((n) => ({ ...n, pins: n.pins ?? [], legDY: n.legDY ?? {} })),
-    signals: s.signals ?? [],
+    nets: (s.nets ?? []).map((n) => ({ ...n, pins: n.pins ?? [], wires: n.wires?.length ? n.wires : null })),
+    signals: (s.signals ?? []).map((g) => ({ ...g, wires: g.wires?.length ? g.wires : null })),
     physPorts: s.physPorts ?? [],
     logicPorts: s.logicPorts ?? [],
     errors: s.errors ?? [],

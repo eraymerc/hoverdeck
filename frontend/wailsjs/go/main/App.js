@@ -6,8 +6,12 @@ export function CheckSyntax(arg1, arg2) {
   return window['go']['main']['App']['CheckSyntax'](arg1, arg2);
 }
 
-export function ClearNetTrunk(arg1, arg2) {
-  return window['go']['main']['App']['ClearNetTrunk'](arg1, arg2);
+export function ClearNetWires(arg1, arg2) {
+  return window['go']['main']['App']['ClearNetWires'](arg1, arg2);
+}
+
+export function ClearSignalWires(arg1, arg2) {
+  return window['go']['main']['App']['ClearSignalWires'](arg1, arg2);
 }
 
 export function CloseFolder() {
@@ -182,16 +186,12 @@ export function SetBlockTransform(arg1, arg2, arg3, arg4, arg5) {
   return window['go']['main']['App']['SetBlockTransform'](arg1, arg2, arg3, arg4, arg5);
 }
 
-export function SetLegOffset(arg1, arg2, arg3, arg4) {
-  return window['go']['main']['App']['SetLegOffset'](arg1, arg2, arg3, arg4);
-}
-
 export function SetNetColor(arg1, arg2, arg3) {
   return window['go']['main']['App']['SetNetColor'](arg1, arg2, arg3);
 }
 
-export function SetNetTrunk(arg1, arg2, arg3, arg4) {
-  return window['go']['main']['App']['SetNetTrunk'](arg1, arg2, arg3, arg4);
+export function SetNetWires(arg1, arg2, arg3) {
+  return window['go']['main']['App']['SetNetWires'](arg1, arg2, arg3);
 }
 
 export function SetPlotX(arg1) {
@@ -204,6 +204,10 @@ export function SetPortNet(arg1, arg2, arg3) {
 
 export function SetSignalPosition(arg1, arg2, arg3, arg4) {
   return window['go']['main']['App']['SetSignalPosition'](arg1, arg2, arg3, arg4);
+}
+
+export function SetSignalWires(arg1, arg2, arg3) {
+  return window['go']['main']['App']['SetSignalWires'](arg1, arg2, arg3);
 }
 
 export function SetSpanText(arg1, arg2, arg3) {

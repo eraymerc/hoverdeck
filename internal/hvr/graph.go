@@ -101,27 +101,10 @@ type Net struct {
 	IsBoundary bool     `json:"isBoundary"`
 	Pins       []NetPin `json:"pins"`
 
-	// Routing / appearance, restored from the sidecar. TrunkX is only
-	// meaningful when HasTrunk is set; otherwise the canvas routes the net
-	// automatically.
-	TrunkX   float64 `json:"trunkX"`
-	TrunkDY  float64 `json:"trunkDY"`
-	HasTrunk bool    `json:"hasTrunk"`
-	Color    string  `json:"color,omitempty"`
-
-	// LegDY holds a per-leg vertical offset, keyed by "blockID:pinIndex",
-	// added on top of TrunkDY. TrunkDY moves every leg of the net together
-	// (a bulk shift); LegDY lets one specific connection be nudged clear of
-	// an obstacle without dragging every other leg along with it. Always
-	// non-nil so it marshals as `{}` rather than `null` when empty.
-	LegDY map[string]float64 `json:"legDY"`
-}
-
-// LegKey identifies one leg of a net for LegDY: the block and pin it comes
-// from. Stable across re-renders as long as the instance name and port order
-// in the source don't change.
-func LegKey(blockID string, pinIndex int) string {
-	return fmt.Sprintf("%s:%d", blockID, pinIndex)
+	// Appearance and routing, restored from the sidecar. Wires is the
+	// hand-edited drawing; nil means the canvas routes the net itself.
+	Color string    `json:"color,omitempty"`
+	Wires []WireSeg `json:"wires"`
 }
 
 // Signal is a non-wire declaration inside the module: a logic value or,
@@ -138,6 +121,11 @@ type Signal struct {
 	Span    Span    `json:"span"`
 	X       float64 `json:"x"`
 	Y       float64 `json:"y"`
+
+	// Wires is the hand-edited drawing of this signal's links to the blocks
+	// that use it, or nil while they are routed automatically — the same
+	// model as Net.Wires.
+	Wires []WireSeg `json:"wires"`
 }
 
 // Sheet is one module rendered as a diagram.
@@ -207,7 +195,6 @@ func (p *Project) BuildSheet(qualified string) (*Sheet, error) {
 			IsGround:   name == "gnd",
 			IsBoundary: boundary[name],
 			Pins:       []NetPin{},
-			LegDY:      map[string]float64{},
 		}
 		nets[name] = n
 		return n

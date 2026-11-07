@@ -2,6 +2,8 @@ package hvr
 
 import (
 	"encoding/json"
+	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +24,17 @@ type SheetLayout struct {
 	// Chips holds positions for signal / state-variable chips, which the
 	// user can arrange on the canvas just like blocks.
 	Chips map[string]*BlockLayout `json:"chips,omitempty"`
+	// Links holds the hand-edited drawings of logic-signal links, by signal
+	// name: the dashed wires from a chip to every block that reads or writes
+	// it. Kept apart from Nets so a signal can never pick up the drawing of
+	// a wire that happens to share its name.
+	Links map[string]*LinkLayout `json:"links,omitempty"`
+}
+
+// LinkLayout is one signal's saved link drawing — the same segments, under
+// the same rules, as NetLayout.Wires.
+type LinkLayout struct {
+	Wires []WireSeg `json:"wires,omitempty"`
 }
 
 // BlockLayout is one block's saved position and appearance.
@@ -45,25 +58,22 @@ type NetLayout struct {
 	Color  string `json:"color,omitempty"`
 	Hidden bool   `json:"hidden,omitempty"`
 
-	// TrunkX pins the net's vertical routing channel to an x position.
-	// A pointer so that "not set" is distinguishable from "set to 0" —
-	// x = 0 is a perfectly reasonable place for a wire to run.
-	TrunkX *float64 `json:"trunkX,omitempty"`
-
-	// TrunkDY shifts where the horizontal runs meet the trunk, relative to
-	// the pins they come from. Together with TrunkX this lets a wire be
-	// dragged in both axes: X moves the vertical channel, Y lifts the
-	// horizontal legs clear of whatever they were crossing. TrunkDY moves
-	// every leg of the net together, as a bulk shift.
-	TrunkDY *float64 `json:"trunkDY,omitempty"`
-
-	// Legs holds a per-leg vertical offset, keyed by "blockID:pinIndex" (see
-	// LegKey), added on top of TrunkDY. This is what lets one connection be
-	// pulled clear of an obstacle independently of the net's other legs —
-	// without it every leg would only ever be able to move in lockstep via
-	// the single shared TrunkDY.
-	Legs map[string]float64 `json:"legs,omitempty"`
+	// Wires is the net's drawing when it has been edited by hand: a set of
+	// horizontal and vertical segments, each [x1, y1, x2, y2] in sheet
+	// coordinates. Empty means the net is routed automatically. The canvas
+	// owns the geometry — routing, editing, re-attaching pins that moved —
+	// and this only stores it; see frontend/src/wires.ts.
+	Wires []WireSeg `json:"wires,omitempty"`
 }
+
+// WireSeg is one straight piece of a hand-edited wire: x1, y1, x2, y2.
+type WireSeg [4]float64
+
+// layoutVersion is written on every save. Version 2 replaced the per-net
+// trunk/leg offsets of version 1 with explicit wire segments; version-1
+// routing is not converted — those nets simply start out automatic again,
+// and the old fields are dropped the next time the sidecar is saved.
+const layoutVersion = 2
 
 // LayoutPath returns the sidecar path for an entry file:
 // `main.hvr` -> `main.hoverdeck.json`.
@@ -98,9 +108,7 @@ func LoadLayout(entry string) *Layout {
 
 // Save writes the sidecar next to the entry file.
 func (l *Layout) Save(entry string) error {
-	if l.Version == 0 {
-		l.Version = 1
-	}
+	l.Version = layoutVersion
 	raw, err := json.MarshalIndent(l, "", "  ")
 	if err != nil {
 		return err
@@ -126,6 +134,9 @@ func (l *Layout) Sheet(module string) *SheetLayout {
 	}
 	if s.Chips == nil {
 		s.Chips = map[string]*BlockLayout{}
+	}
+	if s.Links == nil {
+		s.Links = map[string]*LinkLayout{}
 	}
 	return s
 }
@@ -155,48 +166,83 @@ func (l *Layout) Apply(sh *Sheet) {
 		n := &sh.Nets[i]
 		if nl, ok := sl.Nets[n.Name]; ok {
 			n.Color = nl.Color
-			if nl.TrunkX != nil {
-				n.TrunkX = *nl.TrunkX
-				n.HasTrunk = true
-			}
-			if nl.TrunkDY != nil {
-				n.TrunkDY = *nl.TrunkDY
-			}
-			for k, v := range nl.Legs {
-				n.LegDY[k] = v
+			if len(nl.Wires) > 0 {
+				n.Wires = append([]WireSeg(nil), nl.Wires...)
 			}
 		}
 	}
 }
 
-// SetNetTrunk pins a net's routing channel in both axes. This is a bulk
-// move — it shifts every leg of the net together via the shared TrunkDY;
-// see SetLegDY to move one leg independently.
-func (l *Layout) SetNetTrunk(module, net string, x, dy float64) {
-	s := l.Sheet(module)
-	n, ok := s.Nets[net]
-	if !ok {
-		n = &NetLayout{}
-		s.Nets[net] = n
+// maxWireSegs bounds one net's drawing. A real net has a handful of
+// segments; the limit only stops a corrupt or hostile sidecar from making
+// the canvas do unbounded work.
+const maxWireSegs = 2000
+
+// checkWires refuses a drawing the canvas never makes: too many segments,
+// a non-finite coordinate, or a segment that is neither horizontal nor
+// vertical. what names the owner in the error.
+func checkWires(what string, wires []WireSeg) error {
+	if len(wires) > maxWireSegs {
+		return fmt.Errorf("%s: %d wire segments is over the limit of %d", what, len(wires), maxWireSegs)
 	}
-	vx, vy := x, dy
-	n.TrunkX = &vx
-	n.TrunkDY = &vy
+	for i, w := range wires {
+		for _, v := range w {
+			if math.IsNaN(v) || math.IsInf(v, 0) {
+				return fmt.Errorf("%s: segment %d has a non-finite coordinate", what, i)
+			}
+		}
+		if w[0] != w[2] && w[1] != w[3] {
+			return fmt.Errorf("%s: segment %d (%g,%g)-(%g,%g) is neither horizontal nor vertical",
+				what, i, w[0], w[1], w[2], w[3])
+		}
+	}
+	return nil
 }
 
-// SetLegDY offsets one leg of a net vertically, independent of its other
-// legs and of the net's own TrunkDY bulk shift.
-func (l *Layout) SetLegDY(module, net, legKey string, dy float64) {
+// copyWires is nil for an empty drawing — "route this automatically" — and
+// otherwise a copy the caller cannot alter afterwards.
+func copyWires(wires []WireSeg) []WireSeg {
+	if len(wires) == 0 {
+		return nil
+	}
+	return append([]WireSeg(nil), wires...)
+}
+
+// SetNetWires records a net's hand-edited drawing. An empty list returns
+// the net to automatic routing. Every segment must be horizontal or
+// vertical and made of finite numbers — the canvas only ever draws
+// orthogonal wires, and anything else is a bug worth refusing loudly.
+func (l *Layout) SetNetWires(module, net string, wires []WireSeg) error {
+	if err := checkWires(fmt.Sprintf("net %q", net), wires); err != nil {
+		return err
+	}
 	s := l.Sheet(module)
 	n, ok := s.Nets[net]
 	if !ok {
 		n = &NetLayout{}
 		s.Nets[net] = n
 	}
-	if n.Legs == nil {
-		n.Legs = map[string]float64{}
+	n.Wires = copyWires(wires)
+	return nil
+}
+
+// SetSignalWires records the hand-edited drawing of a logic signal's links,
+// under the same rules as SetNetWires.
+func (l *Layout) SetSignalWires(module, signal string, wires []WireSeg) error {
+	if err := checkWires(fmt.Sprintf("signal %q", signal), wires); err != nil {
+		return err
 	}
-	n.Legs[legKey] = dy
+	s := l.Sheet(module)
+	k, ok := s.Links[signal]
+	if !ok {
+		k = &LinkLayout{}
+		s.Links[signal] = k
+	}
+	k.Wires = copyWires(wires)
+	if k.Wires == nil {
+		delete(s.Links, signal)
+	}
+	return nil
 }
 
 // SetBlockTransform records a block's orientation.
@@ -215,17 +261,6 @@ func (l *Layout) SetBlockTransform(module, blockID string, rot int, flipX, flipY
 	b.Rot, b.FlipX, b.FlipY = rot, flipX, flipY
 }
 
-// ClearNetTrunk returns a net to fully automatic routing — both the bulk
-// TrunkX/TrunkDY shift and any per-leg offsets are forgotten.
-func (l *Layout) ClearNetTrunk(module, net string) {
-	s := l.Sheet(module)
-	if n, ok := s.Nets[net]; ok {
-		n.TrunkX = nil
-		n.TrunkDY = nil
-		n.Legs = nil
-	}
-}
-
 // applyChips restores saved signal-chip positions and lays out any that have
 // never been placed in a lane above the blocks.
 func (l *Layout) applyChips(sh *Sheet, sl *SheetLayout) {
@@ -240,6 +275,9 @@ func (l *Layout) applyChips(sh *Sheet, sl *SheetLayout) {
 
 	for i := range sh.Signals {
 		s := &sh.Signals[i]
+		if k, ok := sl.Links[s.Name]; ok {
+			s.Wires = copyWires(k.Wires)
+		}
 		if cl, ok := sl.Chips[s.Name]; ok {
 			s.X, s.Y = cl.X, cl.Y
 			continue
@@ -275,12 +313,15 @@ func (l *Layout) SetChipPos(module, name string, x, y float64) {
 // on first drag, so this only has to be a reasonable starting point that
 // never overlaps, not a finished schematic.
 func autoPlace(sh *Sheet, idx []int) {
+	// Every step is a multiple of the canvas's 16px symbol grid, so a block
+	// that has never been moved already has its pins on the grid — and does
+	// not jump when it is first dragged and snaps.
 	const (
-		colW   = 260
-		rowH   = 150
+		colW    = 256
+		rowH    = 144
 		originX = 80
 		originY = 80
-		perCol = 5
+		perCol  = 5
 	)
 	// Start below whatever is already placed so new blocks do not land on top
 	// of an arranged diagram.

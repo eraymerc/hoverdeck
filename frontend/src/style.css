@@ -579,9 +579,11 @@ svg.canvas.panning { cursor: grabbing; }
   stroke: var(--signal);
   stroke-width: 1.5;
   stroke-dasharray: 4 3;
-  opacity: .75;
+  /* stroke-opacity, not opacity: opacity makes the renderer paint each
+     element into a layer of its own, and a signal is many segments. */
+  stroke-opacity: .75;
 }
-.slink.hot { opacity: 1; stroke-width: 2.2; }
+.slink.hot { stroke-opacity: 1; stroke-width: 2.2; }
 
 .net-label {
   font-family: var(--font-mono);
@@ -628,8 +630,8 @@ svg.canvas.panning { cursor: grabbing; }
   stroke-linejoin: round;
 }
 /* Pin dots stay out of the drawing until they mean something. */
-.sym-pin { opacity: 0; }
-.block:hover .sym-pin, .sym-pin.hot { opacity: 1; }
+.sym-pin { visibility: hidden; }
+.block:hover .sym-pin, .sym-pin.hot { visibility: visible; }
 
 /* Blocks are cards: square, keylined, no radius. Selection is yellow. */
 .block { cursor: pointer; }
@@ -697,13 +699,47 @@ svg.canvas.panning { cursor: grabbing; }
 .port-text { font-family: var(--font-mono); font-size: 10px; fill: var(--domain-boundary); }
 
 /* Draggable routing */
-.wire.trunk { cursor: ew-resize; }
-.wire.trunk:hover { stroke: var(--wire-hot); stroke-width: 3; }
-.wire.pinned { stroke-dasharray: none; }
-.trunk-grip { stroke: transparent; stroke-width: 11; fill: none; cursor: ew-resize; }
-.wire[data-trunk-y] { cursor: ns-resize; }
-.wire[data-trunk-y]:hover { stroke: var(--wire-hot); stroke-width: 2.4; }
-.trunk-grip-y { stroke: transparent; stroke-width: 11; fill: none; cursor: ns-resize; }
+/* Wire editing (see wires.ts). A segment's grip is the wide invisible
+   stroke a drag actually grabs, drawn over the wire; on hover it shows as a
+   soft halo, so it is clear which segment will move, and the cursor says
+   which way. Bends get a small square handle, shown while the pointer is
+   anywhere on that net. */
+.seg-grip {
+  stroke: transparent; stroke-width: 12; fill: none; stroke-linecap: round;
+}
+.seg-grip.h { cursor: ns-resize; }
+.seg-grip.v { cursor: ew-resize; }
+.seg-grip:hover { stroke: var(--wire-hot); stroke-opacity: .22; }
+.bend-grip { fill: transparent; stroke: none; cursor: move; }
+.netg:hover .bend-grip { fill: var(--canvas-ground); stroke: var(--wire-hot); stroke-width: 1.4; }
+.netg .bend-grip:hover { fill: var(--wire-hot); }
+
+/* Logic-signal links edit the same way, in the signal's own colour. */
+.seg-grip.sig:hover { stroke: var(--signal); }
+.sigg:hover .bend-grip { fill: var(--canvas-ground); stroke: var(--signal); stroke-width: 1.4; }
+.sigg .bend-grip:hover { fill: var(--signal); }
+.sig-junction { fill: var(--signal); }
+.slink-arrow { fill: var(--signal); fill-opacity: .75; }
+.slink-arrow.hot { fill-opacity: 1; }
+
+/* Right-click menu on a wire. */
+.wire-menu {
+  position: absolute; z-index: 20;
+  display: flex; flex-direction: column; min-width: 200px;
+  background: var(--surface-card);
+  border: var(--border-strong);
+  box-shadow: var(--shadow-hard-xs);
+  font-family: var(--font-mono); font-size: 11px;
+}
+.wire-menu-title {
+  padding: 6px 10px; color: var(--text-faint);
+  border-bottom: 1px solid var(--canvas-hair);
+}
+.wire-menu button {
+  all: unset; padding: 7px 10px; cursor: pointer; color: var(--text-body);
+}
+.wire-menu button:hover:not([disabled]) { background: var(--surface-sunk); }
+.wire-menu button[disabled] { color: var(--text-faint); cursor: default; }
 
 .canvas-empty {
   position: absolute; inset: 0;

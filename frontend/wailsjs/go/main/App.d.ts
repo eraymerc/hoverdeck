@@ -6,7 +6,9 @@ import {plot} from '../models';
 
 export function CheckSyntax(arg1:string,arg2:string):Promise<Array<string>>;
 
-export function ClearNetTrunk(arg1:string,arg2:string):Promise<void>;
+export function ClearNetWires(arg1:string,arg2:string):Promise<void>;
+
+export function ClearSignalWires(arg1:string,arg2:string):Promise<void>;
 
 export function CloseFolder():Promise<main.Workspace>;
 
@@ -94,17 +96,17 @@ export function SetBlockPosition(arg1:string,arg2:string,arg3:number,arg4:number
 
 export function SetBlockTransform(arg1:string,arg2:string,arg3:number,arg4:boolean,arg5:boolean):Promise<void>;
 
-export function SetLegOffset(arg1:string,arg2:string,arg3:string,arg4:number):Promise<void>;
-
 export function SetNetColor(arg1:string,arg2:string,arg3:string):Promise<void>;
 
-export function SetNetTrunk(arg1:string,arg2:string,arg3:number,arg4:number):Promise<void>;
+export function SetNetWires(arg1:string,arg2:string,arg3:Array<hvr.WireSeg>):Promise<void>;
 
 export function SetPlotX(arg1:string):Promise<main.PlotInfo>;
 
 export function SetPortNet(arg1:string,arg2:hvr.Span,arg3:string):Promise<void>;
 
 export function SetSignalPosition(arg1:string,arg2:string,arg3:number,arg4:number):Promise<void>;
+
+export function SetSignalWires(arg1:string,arg2:string,arg3:Array<hvr.WireSeg>):Promise<void>;
 
 export function SetSpanText(arg1:string,arg2:hvr.Span,arg3:string):Promise<void>;
 

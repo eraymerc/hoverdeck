@@ -63,7 +63,7 @@ function shell() {
         <img src="${logoLockupMark}" alt="hoverdeck"/>
         <span class="wordmark">HOVER<span>DECK</span></span>
       </div>
-      <span class="ver">v0.8.0</span>
+      <span class="ver">v0.9.0</span>
 
       <button id="btn-open" class="inverse" title="Open a file or folder (Ctrl+O)">${ui('folder-open', 14)}Open</button>
       <button id="btn-main" class="inverse" title="Open the entry file in the editor">${ui('file-code', 14)}Entry</button>
@@ -155,11 +155,18 @@ function shell() {
     onMoveSignal: (name, x, y) => {
       if (state.sheet) API.SetSignalPosition(state.sheet.qualified, name, x, y).catch(showErr);
     },
-    onMoveNetTrunk: (net, x, dy) => {
-      if (state.sheet) API.SetNetTrunk(state.sheet.qualified, net, x, dy).catch(showErr);
+    onSetSignalWires: (signal, wires) => {
+      if (!state.sheet) return;
+      const q = state.sheet.qualified;
+      const save = wires ? API.SetSignalWires(q, signal, wires as any) : API.ClearSignalWires(q, signal);
+      save.then(() => { if (state.selSignal === signal) renderInspector(); }).catch(showErr);
     },
-    onMoveLeg: (net, legKey, dy) => {
-      if (state.sheet) API.SetLegOffset(state.sheet.qualified, net, legKey, dy).catch(showErr);
+    onSetNetWires: (net, wires) => {
+      if (!state.sheet) return;
+      const q = state.sheet.qualified;
+      const save = wires ? API.SetNetWires(q, net, wires as any) : API.ClearNetWires(q, net);
+      // The inspector says whether a net is edited or automatic.
+      save.then(() => { if (state.selNet === net) renderInspector(); }).catch(showErr);
     },
     onDropCatalog: (payload, x, y) => onDrop(payload, x, y),
   });
@@ -1438,12 +1445,14 @@ function renderNetInspector(el: HTMLElement) {
     <div class="insp-section">
       <div class="insp-title">Routing</div>
       <div class="row">
-        <span>${net.hasTrunk ? 'placed by hand' : 'automatic'}</span>
+        <span>${net.wires ? 'edited by hand' : 'automatic'}</span>
         <span class="spacer" style="flex:1"></span>
-        <button id="net-auto" ${net.hasTrunk ? '' : 'disabled'}>Reset to automatic</button>
+        <button id="net-auto" ${net.wires ? '' : 'disabled'}>Reset to automatic</button>
       </div>
       <div class="empty-note" style="margin-top:6px">
-        Drag a wire's vertical trunk on the canvas to move it.
+        Drag any segment of a wire to move it, or a bend to move it both ways.
+        Double-click a segment to add a bend, a bend to remove it. The first
+        edit fixes the wire's shape; moving a block stretches it to follow.
       </div>
     </div>
 
@@ -1468,7 +1477,7 @@ function renderNetInspector(el: HTMLElement) {
 
   document.getElementById('net-auto')?.addEventListener('click', async () => {
     try {
-      await API.ClearNetTrunk(sh.qualified, net.name);
+      await API.ClearNetWires(sh.qualified, net.name);
       await refreshSheet();
       renderInspector();
     } catch (e) { showErr(e); }
@@ -1531,6 +1540,19 @@ function renderSignalInspector(el: HTMLElement) {
       ${readers.join('') || '<div class="empty-note">Not passed to any logic port in this module.</div>'}
     </div>
 
+    ${readers.length ? `<div class="insp-section">
+      <div class="insp-title">Routing</div>
+      <div class="row">
+        <span>${sig.wires ? 'edited by hand' : 'automatic'}</span>
+        <span class="spacer" style="flex:1"></span>
+        <button id="s-auto" ${sig.wires ? '' : 'disabled'}>Reset to automatic</button>
+      </div>
+      <div class="empty-note" style="margin-top:6px">
+        The dashed links edit like wires: drag a segment or a bend, double-click
+        to add or remove a bend.
+      </div>
+    </div>` : ''}
+
     <div class="insp-section">
       <button id="s-src">Show declaration</button>
     </div>`;
@@ -1544,6 +1566,13 @@ function renderSignalInspector(el: HTMLElement) {
     }));
   document.getElementById('s-src')?.addEventListener('click', () =>
     openInEditor(sh.file, sig.line, sig.line));
+  document.getElementById('s-auto')?.addEventListener('click', async () => {
+    try {
+      await API.ClearSignalWires(sh.qualified, sig.name);
+      await refreshSheet();
+      renderInspector();
+    } catch (e) { showErr(e); }
+  });
 }
 
 // ── Actions ──────────────────────────────────────────────────────────────

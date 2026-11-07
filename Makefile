@@ -22,7 +22,7 @@
 #   make check         → vet + test (what CI runs)
 #   make clean         → Remove build artifacts
 #
-# make all VERSION=v0.8.0   (VERSION defaults to v0.0.0-dev if unset)
+# make all VERSION=v0.9.0   (VERSION defaults to v0.0.0-dev if unset)
 # ─────────────────────────────────────────────────────────────────────────────
 
 BIN        := build/bin/hoverdeck
@@ -148,6 +148,7 @@ $(foreach p,$(PLATFORMS),$(eval $(call PLATFORM_TEMPLATE,$(p))))
 ## test — backend unit tests
 test:
 	go test ./...
+	cd frontend && npm test --silent
 
 ## vet — static checks over Go and TypeScript
 vet:
@@ -170,7 +171,7 @@ help:
 	@echo "  make check       - vet + test (what CI runs)"
 	@echo "  make clean       - Remove build artifacts"
 	@echo ""
-	@echo "  VERSION=$(VERSION) (override with VERSION=v0.8.0)"
+	@echo "  VERSION=$(VERSION) (override with VERSION=v0.9.0)"
 	@echo "  Building needs rsvg-convert and ImageMagick on PATH."
 	@echo "  macOS is unsupported by project policy; BSDs/riscv64/linux-386"
 	@echo "  have no Wails runtime, and linux/arm64 needs an aarch64"

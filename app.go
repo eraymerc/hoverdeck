@@ -560,23 +560,17 @@ func (a *App) StopRun() error { return a.runner.Stop() }
 // IsRunning reports whether a compile/simulation is in flight.
 func (a *App) IsRunning() bool { return a.runner.Running() }
 
-// SetNetTrunk pins the vertical routing channel of a net to an x position,
-// letting the user pull a wire clear of whatever it was overlapping.
-func (a *App) SetNetTrunk(module, net string, x, dy float64) error {
+// SetNetWires saves a net's hand-edited drawing: horizontal and vertical
+// segments, [x1, y1, x2, y2] each. The canvas computes them; this validates
+// and stores them in the sidecar. Presentation only — the netlist is the
+// source's, and is unchanged.
+func (a *App) SetNetWires(module, net string, wires []hvr.WireSeg) error {
 	if a.layout == nil {
 		return fmt.Errorf("no project open")
 	}
-	a.layout.SetNetTrunk(module, net, x, dy)
-	return a.layout.Save(a.entry)
-}
-
-// SetLegOffset moves one leg of a net vertically, independent of its other
-// legs. legKey identifies the leg as "blockID:pinIndex" (see hvr.LegKey).
-func (a *App) SetLegOffset(module, net, legKey string, dy float64) error {
-	if a.layout == nil {
-		return fmt.Errorf("no project open")
+	if err := a.layout.SetNetWires(module, net, wires); err != nil {
+		return err
 	}
-	a.layout.SetLegDY(module, net, legKey, dy)
 	return a.layout.Save(a.entry)
 }
 
@@ -590,13 +584,27 @@ func (a *App) SetBlockTransform(module, blockID string, rot int, flipX, flipY bo
 	return a.layout.Save(a.entry)
 }
 
-// ClearNetTrunk returns a net to automatic routing.
-func (a *App) ClearNetTrunk(module, net string) error {
+// ClearNetWires forgets a net's hand-edited drawing, returning it to
+// automatic routing.
+func (a *App) ClearNetWires(module, net string) error {
+	return a.SetNetWires(module, net, nil)
+}
+
+// SetSignalWires saves the hand-edited drawing of a logic signal's links —
+// the dashed wires from its chip to the blocks that use it.
+func (a *App) SetSignalWires(module, signal string, wires []hvr.WireSeg) error {
 	if a.layout == nil {
 		return fmt.Errorf("no project open")
 	}
-	a.layout.ClearNetTrunk(module, net)
+	if err := a.layout.SetSignalWires(module, signal, wires); err != nil {
+		return err
+	}
 	return a.layout.Save(a.entry)
+}
+
+// ClearSignalWires returns a signal's links to automatic routing.
+func (a *App) ClearSignalWires(module, signal string) error {
+	return a.SetSignalWires(module, signal, nil)
 }
 
 // ── Packages ─────────────────────────────────────────────────────────────────
