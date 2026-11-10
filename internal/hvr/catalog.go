@@ -60,72 +60,16 @@ func Primitives() []PrimitiveDef {
 	return out
 }
 
-// moduleIcons maps well-known standard-library module names to their
-// conventional schematic symbol. Anything unrecognised falls back to a
-// domain-shaped generic block, so user modules still render sensibly.
-var moduleIcons = map[string]string{
-	"NPN":   "npn",
-	"PNP":   "pnp",
-	"NMOS":  "nmos",
-	"NMOS4": "nmos4",
-	"PMOS":  "pmos",
-	"PMOS4": "pmos4",
-	"Diode": "diode",
-	"LED":   "led",
-	"OpAmp": "opamp",
-	"PMSM":  "motor",
-}
-
-// stdlibFamilyIcons maps a standard-library DIRECTORY to the symbol every
-// module declared inside it should wear.
+// IconFor is the fallback symbol for a module whose library ships none (see
+// libsymbols.go — SymbolLib.For tries the library first): a few names that
+// say what they are, then the shape of the module's domain. bare is the
+// unqualified module name, domain its declared domain.
 //
-// The part cards under `parts/` are named after the real device — Q2N2222,
-// D1N4007, MIRF9540N — and nothing in those names says which symbol to draw:
-// Q2N2222 is an NPN and Q2N2907 a PNP, and only the directory they sit in
-// tells them apart. So the family is read from the path, which is the same
-// thing the library itself uses to organise them.
-//
-// Longest-first: `parts/mosfet/nmos` has to win over any shorter prefix that
-// might later be added above it.
-var stdlibFamilyIcons = []struct{ dir, icon string }{
-	{"parts/bjt/npn", "npn"},
-	{"parts/bjt/pnp", "pnp"},
-	{"parts/mosfet/nmos", "nmos"},
-	{"parts/mosfet/pmos", "pmos"},
-	{"optoelectronics/leds", "led"},
-	{"parts/diode", "diode"},
-	{"electromechanical", "motor"},
-	{"analog/opamp", "opamp"},
-}
-
-// familyIcon returns the symbol implied by the directory a definition was
-// declared in, or "" when the path says nothing.
-func familyIcon(file string) string {
-	if file == "" {
-		return ""
-	}
-	dir := filepath.ToSlash(filepath.Dir(file))
-	for _, f := range stdlibFamilyIcons {
-		if dir == f.dir || strings.HasSuffix(dir, "/"+f.dir) {
-			return f.icon
-		}
-	}
-	return ""
-}
-
-// IconFor picks the symbol for a module instance. bare is the unqualified
-// module name; domain is its declared domain; file is the path of the file
-// that declares it, which may be empty when the definition was not found.
-func IconFor(bare, domain, file string) string {
-	if ic, ok := moduleIcons[bare]; ok {
-		return ic
-	}
-	// A part card wears its family's symbol. The device models themselves are
-	// named above; their part cards are not, and cannot be — nothing in
-	// "Q2N2222" or "MIRF9540N" says which symbol it wants.
-	if ic := familyIcon(file); ic != "" {
-		return ic
-	}
+// Until the standard library carried its own symbols, this was also where
+// NPN, NMOS, Diode, LED, the part-card families and the rest were mapped, by
+// name and by stdlib directory; those now come from the library's symbols/
+// folders, so a new library component brings its symbol with it.
+func IconFor(bare, domain string) string {
 	switch {
 	case strings.Contains(strings.ToLower(bare), "opamp"):
 		return "opamp"
@@ -186,7 +130,7 @@ type CatalogEntry struct {
 // Grouped by DIRECTORY rather than by file, because a directory is the import
 // unit: `import <semiconductors>` brings in everything the palette shows under
 // "semiconductors", regardless of which file inside it declared what.
-func ScanPackages(pkgs *Packages) []CatalogEntry {
+func ScanPackages(pkgs *Packages, lib *SymbolLib) []CatalogEntry {
 	var out []CatalogEntry
 	if pkgs == nil {
 		return out
@@ -207,7 +151,7 @@ func ScanPackages(pkgs *Packages) []CatalogEntry {
 				return nil
 			}
 			seen[dir] = true
-			out = append(out, scanDir(pkgs, dir)...)
+			out = append(out, scanDir(pkgs, lib, dir)...)
 			return nil
 		})
 	}
@@ -223,7 +167,7 @@ func ScanPackages(pkgs *Packages) []CatalogEntry {
 
 // scanDir builds the palette entries for the .hvr files directly inside one
 // package directory.
-func scanDir(pkgs *Packages, dir string) []CatalogEntry {
+func scanDir(pkgs *Packages, lib *SymbolLib, dir string) []CatalogEntry {
 	files, err := loader.HvrFilesIn(dir)
 	if err != nil || len(files) == 0 {
 		return nil
@@ -262,7 +206,7 @@ func scanDir(pkgs *Packages, dir string) []CatalogEntry {
 			out = append(out, CatalogEntry{
 				Kind:         "module",
 				Name:         def.Name,
-				Icon:         IconFor(def.Name, def.Domain, path),
+				Icon:         lib.For(def.Name, def.Domain, path),
 				Domain:       def.Domain,
 				Desc:         def.Doc,
 				Group:        importPath,

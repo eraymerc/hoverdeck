@@ -27,6 +27,11 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Println("files:", len(p.Files), "errors:", p.AllErrors())
+	// The symbol set the app builds: built-ins plus the libraries' symbols/.
+	p.Symbols = hvr.NewSymbolLib(pkgs, p.Root)
+	for _, e := range p.Symbols.Errors {
+		fmt.Println("symbol error:", e)
+	}
 
 	fmt.Println("\n-- visible modules --")
 	for _, d := range p.Modules() {
@@ -38,13 +43,14 @@ func main() {
 		fmt.Println("sheet error:", err)
 		os.Exit(1)
 	}
+	hvr.FitSymbols(sh, p.Symbols)
 	fmt.Printf("\n-- sheet %s (%s) lines %d-%d --\n", sh.Qualified, sh.Domain, sh.Span.StartLine, sh.Span.EndLine)
 	for _, b := range sh.Blocks {
 		params := []string{}
 		for _, a := range b.Params {
 			params = append(params, a.Text)
 		}
-		fmt.Printf("  [%-6s] %-10s %-16s icon=%-10s nav=%-5v params=%v\n", b.Kind, b.ID, b.TypeName, b.Icon, b.Navigable, params)
+		fmt.Printf("  [%-6s] %-10s %-16s icon=%-10s fits=%-5v nav=%-5v params=%v\n", b.Kind, b.ID, b.TypeName, b.Icon, b.SymPins != nil, b.Navigable, params)
 		for _, pin := range b.Pins {
 			fmt.Printf("        pin %-6s -> %-12s span=%d..%d %q\n", pin.Name, pin.Net, pin.Span.Start, pin.Span.End, sliceOf(p, sh.File, pin.Span))
 		}

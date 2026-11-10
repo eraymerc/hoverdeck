@@ -35,13 +35,19 @@ to the source) and `NMOS4`/`PMOS4` (bulk brought out), a diode/LED, an op-amp
 triangle, and a motor circle for `PMSM`. A module with no matching symbol is drawn as
 a box. Primitives are labelled with SPICE reference designators (`R1`, `C2`, `V1`, …).
 
-Symbols are plain SVG files in `internal/hvr/symbols/`, with pins marked in the
-drawing; the format, and how a module's ports find a symbol's pins, is written down in
+Symbols are plain SVG files with pins marked in the drawing; the format, and how a
+module's ports find a symbol's pins, is written down in
 [`internal/hvr/symbols/README.md`](internal/hvr/symbols/README.md).
 
-The **part cards** under `parts/` — `Q2N2222`, `D1N4007`, `M2N7000`, `MIRF9540N` and
-the rest — get their family's symbol from the directory they are declared in, since
-nothing in the name of a real device says whether it is an NPN or a PNP.
+**Library modules bring their own symbols.** Every directory of `.hvr` files may carry
+a `symbols/` folder: a module wears `symbols/<its name, lower-cased>.svg` from its own
+directory, or else that folder's `default.svg`. The standard library ships its symbols
+this way (`semiconductors/bjt/symbols/npn.svg`, `parts/bjt/npn/symbols/default.svg`, …),
+so the **part cards** under `parts/` — `Q2N2222`, `D1N4007`, `M2N7000` and the rest,
+named after real devices — wear their folder's default, and a new library component
+needs no change to hoverdeck to be drawn. Third-party packages and a project's own
+folders work the same way. Only the primitives' symbols and the generic domain shapes
+are built into hoverdeck (`internal/hvr/symbols/`).
 
 ## What you can do
 

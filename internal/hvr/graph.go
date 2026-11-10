@@ -247,9 +247,9 @@ func (p *Project) BuildSheet(qualified string) (*Sheet, error) {
 					"line %d: module %q is not visible here — is its import missing?", n.Token.Line, n.ModuleName))
 				b.Pins = bindPins(src, g.PhysArgs, nil, -1)
 			}
-			// b.Def.File is empty when the definition was not found, which is
-			// exactly the "path says nothing" case IconFor handles.
-			b.Icon = IconFor(bare, b.Domain, b.Def.File)
+			// b.Def.File is empty when the definition was not found; For then
+			// falls back to IconFor's generic shapes.
+			b.Icon = p.Symbols.For(bare, b.Domain, b.Def.File)
 			b.Params = g.StaticArgs
 			b.Logic = g.LogicArgs
 

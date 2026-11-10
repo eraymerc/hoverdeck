@@ -1,8 +1,24 @@
 # Schematic symbol format
 
-One symbol per file, `<name>.svg`; the file name is the symbol's id — the value
-`IconFor`, the primitive table and the sidecar's icon override refer to. Names
-are lower-case letters, digits, `-` and `_`.
+One symbol per file, `<name>.svg`. Names are lower-case letters, digits, `-`
+and `_`.
+
+## Where symbols live
+
+- **Here** (built into hoverdeck): the primitives' symbols and the generic
+  shapes `IconFor` falls back to — `analog`, `digital`, `structural`, `filter`,
+  `opamp`, `motor`, … The id is the file name.
+- **In libraries**: every directory of `.hvr` files may carry a `symbols/`
+  folder. A module wears `symbols/<its name, lower-cased>.svg` from its own
+  directory, or else `symbols/default.svg` there (how a folder of part cards
+  gets its family's symbol). The id is the directory's import path plus the
+  file name — `semiconductors/bjt/npn`, `parts/bjt/npn/default` — or
+  `./<path from the project root>/<name>` beside a project's own sources. See
+  `../libsymbols.go`. The standard library's device symbols live there now
+  (`stdlib/semiconductors/bjt/symbols/npn.svg`, …), not here.
+
+The id is what the primitive table, `SymbolLib.For` and the sidecar's icon
+override refer to.
 
 The drawings here follow the Elektuur style of the late 1970s–80s, taken from
 the CC0 [kicad-elektuur-symbols](https://gitlab.com/mgyger/kicad-addons/)
@@ -38,7 +54,9 @@ canvas can theme and highlight symbols:
 | `dash` | dashed — a reference rather than a connection                  |
 
 `data-if-pin="<pin>"` on a top-level element draws it only when that
-(optional) pin is connected — the supply leads of an op-amp, for example.
+(optional) pin is connected — the supply leads of an op-amp, for example. It
+may list several names, space separated, pins or logic ports: the element is
+drawn when any of them is connected.
 
 Skipped silently: `<title>`, `<desc>`, `<metadata>`, `<style>`, `<defs>`,
 comments, editor attributes in their own namespace (`inkscape:*`,
@@ -74,6 +92,29 @@ three passes: exact name, then a port ending in `_<pin>` (`led_anode` finds
 every non-optional pin is used; otherwise the block is drawn as a box with the
 symbol as its header icon. A symbol with no pins at all is only ever such a
 header icon.
+
+## Logic ports
+
+Logic-signal links (the dashed wires from signal chips) attach to a block at
+one point per logic argument. A symbol may say where:
+
+```svg
+<circle data-logic="omega_m_out" data-alias="omega" data-flow="out" data-dir="down" cx="-24" cy="24" r="2"/>
+<circle data-logic="" data-flow="in" data-dir="left" cx="-16" cy="0" r="2"/>
+```
+
+| attribute    | meaning                                                         |
+|--------------|-----------------------------------------------------------------|
+| `data-logic` | the port name it binds to; empty takes the next port of its flow |
+| `data-flow`  | `in` or `out`                                                   |
+| `data-dir`   | the way the link leaves                                         |
+| `data-alias` | other port names that bind here                                 |
+
+Same grid and viewBox rules as pins. Ports a symbol does not place go, in
+order: on its free sides (no pin leaves from them) — inputs preferring left,
+top, bottom, right; outputs right, bottom, top, left — as many per side as fit
+16px apart; and if that runs out, on a rail that carries the row on past the
+end of the symbol. See frontend/src/ports.ts.
 
 ## Checking a symbol
 

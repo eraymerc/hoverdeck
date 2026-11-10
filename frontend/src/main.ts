@@ -1394,8 +1394,12 @@ async function transformBlock(b: Block, what: 'rotate' | 'flipX' | 'flipY') {
   const fx = what === 'flipX' ? !b.flipX : b.flipX;
   const fy = what === 'flipY' ? !b.flipY : b.flipY;
   try {
+    // The canvas turns the block and bends its edited wires out to the ports
+    // where they now are, saving those wires itself. The sheet is not
+    // re-fetched afterwards: that could race those saves and bring back the
+    // drawings from before the turn.
+    canvas.transformBlock(b.id, rot, fx, fy);
     await API.SetBlockTransform(state.sheet.qualified, b.id, rot, fx, fy);
-    await refreshSheet();
     renderRight();
   } catch (e) { showErr(e); }
 }
@@ -1450,8 +1454,9 @@ function renderNetInspector(el: HTMLElement) {
         <button id="net-auto" ${net.wires ? '' : 'disabled'}>Reset to automatic</button>
       </div>
       <div class="empty-note" style="margin-top:6px">
-        Drag any segment of a wire to move it, or a bend to move it both ways.
-        Double-click a segment to add a bend, a bend to remove it. The first
+        Drag any segment of a wire to move it, or a bend to move it both ways;
+        runs that come into line merge. Double-click a segment to separate it
+        into a step, a bend to take it out. The first
         edit fixes the wire's shape; moving a block stretches it to follow.
       </div>
     </div>
@@ -1548,8 +1553,8 @@ function renderSignalInspector(el: HTMLElement) {
         <button id="s-auto" ${sig.wires ? '' : 'disabled'}>Reset to automatic</button>
       </div>
       <div class="empty-note" style="margin-top:6px">
-        The dashed links edit like wires: drag a segment or a bend, double-click
-        to add or remove a bend.
+        The dashed links edit like wires: drag a segment or a bend; double-click
+        a segment to separate it, a bend to take it out.
       </div>
     </div>` : ''}
 

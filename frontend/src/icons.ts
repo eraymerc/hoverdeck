@@ -46,7 +46,8 @@ export function iconIds(): string[] {
  */
 export function symbolBody(sym: SymbolDef, connected: Set<string> | null): string {
   return (sym.parts ?? [])
-    .filter((p) => !p.ifPin || (connected?.has(p.ifPin) ?? false))
+    // ifPin may list several names: the part is drawn when any is connected.
+    .filter((p) => !p.ifPin || p.ifPin.split(/\s+/).some((name) => connected?.has(name) ?? false))
     .map((p) => p.markup)
     .join('');
 }

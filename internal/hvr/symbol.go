@@ -68,6 +68,22 @@ type Symbol struct {
 	ViewBox [4]float64   `json:"viewBox"` // minX, minY, width, height
 	Parts   []SymbolPart `json:"parts"`
 	Pins    []SymbolPin  `json:"pins"`
+	// Logic is where logic-signal links attach, when the symbol says: a
+	// source's control input, a motor's measured outputs. Ports the symbol
+	// does not place are placed by the canvas.
+	Logic []SymbolLogic `json:"logic"`
+}
+
+// SymbolLogic is a place on a symbol for a logic port's link to attach.
+type SymbolLogic struct {
+	// Name binds it to a port by name, like a pin; empty takes whichever
+	// port of its flow comes next.
+	Name    string   `json:"name"`
+	Aliases []string `json:"aliases"`
+	Flow    string   `json:"flow"` // in | out
+	X       float64  `json:"x"`
+	Y       float64  `json:"y"`
+	Dir     string   `json:"dir"` // the way the link leaves
 }
 
 // IconOnly reports whether the symbol has no pins, which makes it a header
@@ -123,7 +139,7 @@ func ParseSymbol(id string, src []byte) (*Symbol, error) {
 	if len(src) > symbolMaxBytes {
 		return nil, fmt.Errorf("%s: %d bytes is over the %d-byte limit for a symbol", id, len(src), symbolMaxBytes)
 	}
-	p := &symbolParser{sym: &Symbol{ID: id, Title: id, Parts: []SymbolPart{}, Pins: []SymbolPin{}}}
+	p := &symbolParser{sym: &Symbol{ID: id, Title: id, Parts: []SymbolPart{}, Pins: []SymbolPin{}, Logic: []SymbolLogic{}}}
 	if err := p.parse(src); err != nil {
 		return nil, fmt.Errorf("%s: %w", id, err)
 	}
@@ -254,6 +270,12 @@ func (p *symbolParser) element(t xml.StartElement, depth int) (string, string, e
 		return "", "", err
 	} else if isPin {
 		p.sym.Pins = append(p.sym.Pins, pin)
+		return "", "", p.dec.Skip()
+	}
+	if lg, isLogic, err := logicMarker(t); err != nil {
+		return "", "", err
+	} else if isLogic {
+		p.sym.Logic = append(p.sym.Logic, lg)
 		return "", "", p.dec.Skip()
 	}
 
@@ -387,6 +409,74 @@ func pinMarker(t xml.StartElement) (SymbolPin, bool, error) {
 	return pin, true, nil
 }
 
+// logicMarker reads a <circle data-logic=… data-flow=… data-dir=…>: a place
+// for a logic link to attach. The name may be empty.
+func logicMarker(t xml.StartElement) (SymbolLogic, bool, error) {
+	var lg SymbolLogic
+	var has, hasX, hasY bool
+	for _, a := range t.Attr {
+		if a.Name.Space != "" {
+			continue
+		}
+		switch a.Name.Local {
+		case "data-logic":
+			has = true
+			lg.Name = strings.TrimSpace(a.Value)
+		case "data-flow":
+			lg.Flow = strings.TrimSpace(a.Value)
+		case "data-dir":
+			lg.Dir = strings.TrimSpace(a.Value)
+		case "data-alias":
+			lg.Aliases = strings.Fields(a.Value)
+		case "cx":
+			v, err := parseNumber(a.Value)
+			if err != nil {
+				return lg, true, fmt.Errorf("logic port cx: %w", err)
+			}
+			lg.X, hasX = v, true
+		case "cy":
+			v, err := parseNumber(a.Value)
+			if err != nil {
+				return lg, true, fmt.Errorf("logic port cy: %w", err)
+			}
+			lg.Y, hasY = v, true
+		}
+	}
+	if !has {
+		return lg, false, nil
+	}
+	what := "unnamed logic port"
+	if lg.Name != "" {
+		what = fmt.Sprintf("logic port %q", lg.Name)
+	}
+	if t.Name.Local != "circle" {
+		return lg, true, fmt.Errorf("%s is on a <%s>; markers must be circles", what, t.Name.Local)
+	}
+	if lg.Name != "" && !pinNameRe.MatchString(lg.Name) {
+		return lg, true, fmt.Errorf("%s: use letters, digits, _, + and -", what)
+	}
+	if lg.Flow != "in" && lg.Flow != "out" {
+		return lg, true, fmt.Errorf("%s: data-flow must be in or out, not %q", what, lg.Flow)
+	}
+	switch lg.Dir {
+	case "left", "right", "up", "down":
+	default:
+		return lg, true, fmt.Errorf("%s: data-dir must be left, right, up or down, not %q", what, lg.Dir)
+	}
+	if !hasX || !hasY {
+		return lg, true, fmt.Errorf("%s needs cx and cy", what)
+	}
+	for _, al := range lg.Aliases {
+		if !pinNameRe.MatchString(al) {
+			return lg, true, fmt.Errorf("%s: alias %q: use letters, digits, _, + and -", what, al)
+		}
+	}
+	if lg.Aliases == nil {
+		lg.Aliases = []string{}
+	}
+	return lg, true, nil
+}
+
 func (p *symbolParser) validate() error {
 	s := p.sym
 	seen := map[string]bool{}
@@ -405,9 +495,30 @@ func (p *symbolParser) validate() error {
 			return fmt.Errorf("pin %q at (%g, %g) is outside the viewBox", pin.Name, pin.X, pin.Y)
 		}
 	}
+	logicNames := map[string]bool{}
+	for _, lg := range s.Logic {
+		if lg.Name != "" {
+			key := strings.ToLower(lg.Name)
+			if logicNames[key] || seen[key] {
+				return fmt.Errorf("logic port %q is declared twice, or shares a pin's name", lg.Name)
+			}
+			logicNames[key] = true
+		}
+		if math.Mod(lg.X, SymbolGrid) != 0 || math.Mod(lg.Y, SymbolGrid) != 0 {
+			return fmt.Errorf("logic port %q at (%g, %g) is off the %dpx grid", lg.Name, lg.X, lg.Y, SymbolGrid)
+		}
+		vb := s.ViewBox
+		if lg.X < vb[0] || lg.X > vb[0]+vb[2] || lg.Y < vb[1] || lg.Y > vb[1]+vb[3] {
+			return fmt.Errorf("logic port %q at (%g, %g) is outside the viewBox", lg.Name, lg.X, lg.Y)
+		}
+	}
+	// data-if-pin takes one name or several, space separated: the part is
+	// drawn when any of them is connected. Pins and named logic ports both count.
 	for _, part := range s.Parts {
-		if part.IfPin != "" && !seen[strings.ToLower(part.IfPin)] {
-			return fmt.Errorf("data-if-pin %q names no pin of this symbol", part.IfPin)
+		for name := range strings.FieldsSeq(part.IfPin) {
+			if key := strings.ToLower(name); !seen[key] && !logicNames[key] {
+				return fmt.Errorf("data-if-pin %q names no pin or logic port of this symbol", name)
+			}
 		}
 	}
 	if len(s.Parts) == 0 {
@@ -558,6 +669,11 @@ type SymbolLib struct {
 	// Errors holds one message per symbol file that failed to load. Those
 	// symbols are simply absent; blocks that wanted them draw as boxes.
 	Errors []string
+
+	// index is set on a library built by NewSymbolLib (libsymbols.go): the
+	// symbols packages and project folders ship, by directory. nil for the
+	// built-in set alone.
+	index *libIndex
 }
 
 // Get returns the named symbol, or nil.
@@ -565,11 +681,19 @@ func (l *SymbolLib) Get(id string) *Symbol {
 	if l == nil {
 		return nil
 	}
+	if l.index != nil { // project symbols load lazily (libsymbols.go)
+		l.index.mu.Lock()
+		defer l.index.mu.Unlock()
+	}
 	return l.byID[id]
 }
 
 // All returns every symbol, ordered by name.
 func (l *SymbolLib) All() []*Symbol {
+	if l.index != nil {
+		l.index.mu.Lock()
+		defer l.index.mu.Unlock()
+	}
 	out := make([]*Symbol, 0, len(l.byID))
 	for _, s := range l.byID {
 		out = append(out, s)

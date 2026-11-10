@@ -16,8 +16,10 @@
  * the wire, and pins that are not on it — a port added in the source, a block
  * rotated — get a fresh branch to the nearest segment.
  *
- * Editing is three operations: move a segment perpendicular to itself, move
- * a corner, and split or merge at a point. Each keeps the drawing connected.
+ * Editing is a handful of operations: move a segment perpendicular to itself,
+ * move a corner, separate a segment into a step, and take a bend out. Each
+ * keeps the drawing connected, and each merges whatever it brings into line:
+ * runs that end up on top of or end to end with each other become one.
  *
  * Everything here is pure — segments in, segments out, no DOM — so that it can
  * be tested on its own (wires.test.ts, `npm test`). Runtime imports are kept
@@ -497,7 +499,9 @@ export function moveSegment(segs: Seg[], i: number, d: number, fixed: Pt[]): Seg
   const moved = new Set([i]);
   followEnd(out, moved, s[0], s[1], dx, dy, fixed, h);
   followEnd(out, moved, s[2], s[3], dx, dy, fixed, h);
-  return normalize(out, fixed);
+  // Whatever the move brought into line merges: a step dragged flat again
+  // becomes one straight run, a run dragged onto another becomes one.
+  return simplify(out, fixed);
 }
 
 /**
@@ -529,7 +533,59 @@ export function dragEnd(segs: Seg[], from: Pt, to: Pt, fixed: Pt[]): Seg[] | nul
   const nf: Pt = [far[0] + ax, far[1] + ay];
   out[i] = [to[0], to[1], nf[0], nf[1]];
   followEnd(out, new Set([i]), far[0], far[1], ax, ay, fixed, h);
-  return normalize(out, [...fixed, to]);
+  return simplify(out, [...fixed, to]);
+}
+
+/**
+ * A pin was turned — its block rotated or mirrored — from `from`, leaving
+ * along `fromDir`, to `to`, leaving along `toDir`. The wire keeps everything
+ * up to where it left the old pin's lead, and a new branch with fresh bends
+ * runs from the new pin out along its new direction to that point. Of the
+ * two ways to make that branch, the one that does not cut across the block
+ * (`box`) is taken.
+ *
+ * Null when `from` is not where exactly one segment ends.
+ */
+export function rewirePin(
+  segs: Seg[], from: Pt, fromDir: Dir, to: Pt, toDir: Dir, fixed: Pt[],
+  box: { x: number; y: number; w: number; h: number } | null,
+): Seg[] | null {
+  if (from[0] === to[0] && from[1] === to[1] && fromDir === toDir) return segs;
+  const inc = incidence(segs).get(ptKey(from[0], from[1])) ?? [];
+  if (inc.length !== 1) return null;
+  const i = inc[0];
+  const s = segs[i];
+  const far: Pt = s[0] === from[0] && s[1] === from[1] ? [s[2], s[3]] : [s[0], s[1]];
+
+  // Cut the old lead: keep the wire from one stub-length out, or — if the
+  // segment is no longer than a stub, or does not leave the way the pin
+  // did — from its far end.
+  const [ux, uy] = stubVec(fromDir);
+  const along = Math.sign(far[0] - from[0]) === ux && Math.sign(far[1] - from[1]) === uy;
+  const out = segs.filter((_, j) => j !== i);
+  let join: Pt = far;
+  if (along && len(s) > STUB) {
+    join = [from[0] + ux * STUB, from[1] + uy * STUB];
+    out.push([join[0], join[1], far[0], far[1]]);
+  }
+
+  // The new branch: out of the new pin along its direction, then one turn
+  // either way round to the join.
+  const [vx, vy] = stubVec(toDir);
+  const sx = to[0] + vx * STUB, sy = to[1] + vy * STUB;
+  const lead: Seg = [to[0], to[1], sx, sy];
+  const verticalFirst: Seg[] = [lead, [sx, sy, sx, join[1]], [sx, join[1], join[0], join[1]]];
+  const acrossFirst: Seg[] = [lead, [sx, sy, join[0], sy], [join[0], sy, join[0], join[1]]];
+  const order = vertical(toDir) ? [verticalFirst, acrossFirst] : [acrossFirst, verticalFirst];
+  const crosses = (q: Seg) => {
+    if (!box) return false;
+    const [x1, x2] = [Math.min(q[0], q[2]), Math.max(q[0], q[2])];
+    const [y1, y2] = [Math.min(q[1], q[3]), Math.max(q[1], q[3])];
+    return x2 > box.x && x1 < box.x + box.w && y2 > box.y && y1 < box.y + box.h;
+  };
+  // The lead itself starts on the block's edge; only what comes after it counts.
+  const branch = order.find((b) => !b.slice(1).some(crosses)) ?? order[0];
+  return simplify([...out, ...branch], [...fixed, to]);
 }
 
 /**
@@ -553,7 +609,7 @@ export function moveCorner(segs: Seg[], pt: Pt, dx: number, dy: number, fixed: P
   const moved = new Set([hi, vi]);
   followEnd(out, moved, hf[0], hf[1], 0, dy, fixed, true);
   followEnd(out, moved, vf[0], vf[1], dx, 0, fixed, false);
-  return normalize(out, fixed);
+  return simplify(out, fixed);
 }
 
 /**
@@ -572,6 +628,60 @@ export function splitAt(segs: Seg[], i: number, x: number, y: number, fixed: Pt[
   return normalize(out, fixed);
 }
 
+/** How far a double-click pushes one side of a segment to separate it. */
+export const SEPARATE = 16;
+
+/**
+ * Separates segment i at the grid point nearest (x, y) into a step: the part
+ * before that point — left of it on a horizontal run, above it on a vertical
+ * one — is pushed aside by SEPARATE (down, or to the left: the same move
+ * turned a quarter), with a short jog joining the two. Drag either part to
+ * shape the step; drag it back into line and it merges again. Nothing
+ * happens if the point is an end of the segment.
+ */
+export function separateAt(segs: Seg[], i: number, x: number, y: number, fixed: Pt[]): Seg[] {
+  const s = segs[i] && canon(segs[i]);
+  if (!s) return segs;
+  const h = isH(s);
+  const p: Pt = h ? [snap(x), s[1]] : [s[0], snap(y)];
+  const inside = h ? p[0] > s[0] && p[0] < s[2] : p[1] > s[1] && p[1] < s[3];
+  if (!inside) return segs;
+  // canon puts the left (or top) end first, so this is the part to push.
+  const out = segs.filter((_, j) => j !== i);
+  out.push([s[0], s[1], p[0], p[1]], [p[0], p[1], s[2], s[3]]);
+
+  // Pushed the usual way unless that would change the way the wire leaves a
+  // pin — pushing a part down onto the short lead of a pin below it would
+  // fold the lead away and leave the pin sideways. Then the other way; and
+  // if neither works, just the split, to be dragged by hand.
+  const leaving = pinExits(segs, fixed);
+  for (const d of h ? [SEPARATE, -SEPARATE] : [-SEPARATE, SEPARATE]) {
+    const next = moveSegment(out, out.length - 2, d, fixed);
+    if (sameExits(leaving, pinExits(next, fixed))) return next;
+  }
+  return normalize(out, fixed);
+}
+
+/** For each pin, the way the wire leaves it ("x,y" → "dx,dy"), where exactly one segment does. */
+function pinExits(segs: Seg[], pins: Pt[]): Map<string, string> {
+  const inc = incidence(segs);
+  const out = new Map<string, string>();
+  for (const [px, py] of pins) {
+    const k = ptKey(px, py);
+    const at = inc.get(k);
+    if (!at || at.length !== 1) continue;
+    const s = segs[at[0]];
+    const [fx, fy] = s[0] === px && s[1] === py ? [s[2], s[3]] : [s[0], s[1]];
+    out.set(k, `${Math.sign(fx - px)},${Math.sign(fy - py)}`);
+  }
+  return out;
+}
+
+function sameExits(a: Map<string, string>, b: Map<string, string>): boolean {
+  for (const [k, v] of a) if (b.get(k) !== v) return false;
+  return true;
+}
+
 /**
  * Removes the point where two segments meet. A straight split point just
  * goes. A bend is flattened by taking out its shorter side: the longer side
@@ -588,10 +698,21 @@ export function removePoint(segs: Seg[], pt: Pt, fixed: Pt[]): Seg[] {
     const fa = far(segs[a]), fb = far(segs[b]);
     const out = segs.filter((_, j) => j !== a && j !== b);
     out.push([fa[0], fa[1], fb[0], fb[1]]);
-    return normalize(out, fixed);
+    return simplify(out, fixed);
   }
+  // A bend goes by moving one side across by the other's length, which
+  // leaves the other with none. Either side can be the one to go: try both,
+  // drop any that would change the way the wire leaves a pin, and keep the
+  // simplest drawing — the shorter side going when it is a tie.
+  const leaving = pinExits(segs, fixed);
   const [short, long] = len(segs[a]) <= len(segs[b]) ? [a, b] : [b, a];
-  const fs = far(segs[short]);
-  const d = isH(segs[long]) ? fs[1] - pt[1] : fs[0] - pt[0];
-  return moveSegment(segs, long, d, fixed);
+  const vanish = (gone: number, mover: number) => {
+    const fg = far(segs[gone]);
+    const d = isH(segs[mover]) ? fg[1] - pt[1] : fg[0] - pt[0];
+    return moveSegment(segs, mover, d, fixed);
+  };
+  const options = [vanish(short, long), vanish(long, short)]
+    .filter((o) => connected(o, fixed) && sameExits(leaving, pinExits(o, fixed)));
+  if (options.length === 0) return segs;
+  return options.reduce((best, o) => (o.length < best.length ? o : best));
 }

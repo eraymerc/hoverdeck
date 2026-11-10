@@ -12,16 +12,13 @@ func TestBuiltinSymbolsAllLoad(t *testing.T) {
 	}
 
 	// Every id the rest of hoverdeck can hand the canvas must exist, or that
-	// block silently degrades to the fallback glyph.
-	want := map[string]bool{"analog": true, "digital": true, "structural": true, "filter": true, "vsource": true}
+	// block silently degrades to the fallback glyph: the primitives' and
+	// IconFor's. Library modules' symbols ship with the library
+	// (libsymbols.go; tested against testdata/stdlib).
+	want := map[string]bool{"analog": true, "digital": true, "structural": true,
+		"filter": true, "vsource": true, "opamp": true, "motor": true}
 	for _, p := range Primitives() {
 		want[p.Icon] = true
-	}
-	for _, ic := range moduleIcons {
-		want[ic] = true
-	}
-	for _, f := range stdlibFamilyIcons {
-		want[f.icon] = true
 	}
 	for id := range want {
 		if lib.Get(id) == nil {
@@ -62,7 +59,16 @@ func pinsNamed(names ...string) []Pin {
 
 // The port lists below are the standard library's, verbatim.
 func TestFitSymbolAgainstStdlibPorts(t *testing.T) {
-	lib := BuiltinSymbols()
+	lib, _ := testSymbolLib(t)
+	// Library symbols by their short name, for the table below.
+	ids := map[string]string{
+		"npn": "semiconductors/bjt/npn", "pnp": "semiconductors/bjt/pnp",
+		"nmos": "semiconductors/mosfet/nmos", "nmos4": "semiconductors/mosfet/nmos4",
+		"pmos4": "semiconductors/mosfet/pmos4", "diode": "semiconductors/diode",
+		"led": "optoelectronics/leds/default",
+		"phototransistor": "optoelectronics/phototransistor/default",
+		"optocoupler": "optoelectronics/optocoupler/default",
+	}
 	cases := []struct {
 		symbol string
 		ports  []string
@@ -96,9 +102,22 @@ func TestFitSymbolAgainstStdlibPorts(t *testing.T) {
 		{"npn", []string{"p1", "p2", "p3"}, nil},
 		// Header glyphs never fit.
 		{"structural", []string{"a"}, nil},
+
+		{"phototransistor", []string{"base", "collector", "emitter", "light_in"}, []string{"base", "collector", "emitter", "light_in"}},
+		// The 6-pin optocoupler brings the base out; the 4-pin one does not.
+		{"optocoupler", []string{"anode", "cathode", "collector", "emitter", "base"}, []string{"anode", "cathode", "collector", "emitter", "base"}},
+		{"optocoupler", []string{"anode", "cathode", "collector", "emitter"}, []string{"anode", "cathode", "collector", "emitter"}},
 	}
 	for _, c := range cases {
-		sym := lib.Get(c.symbol)
+		id := c.symbol
+		if full, ok := ids[id]; ok {
+			id = full
+		}
+		sym := lib.Get(id)
+		if sym == nil {
+			t.Errorf("no symbol %q", id)
+			continue
+		}
 		got := FitSymbol(sym, pinsNamed(c.ports...))
 		if c.want == nil {
 			if got != nil {
@@ -122,7 +141,8 @@ func TestFitSymbolAgainstStdlibPorts(t *testing.T) {
 // an alias of collector, but a block that also has a port literally called
 // "collector" should get that one.
 func TestFitSymbolPrefersExactNames(t *testing.T) {
-	sym := BuiltinSymbols().Get("npn")
+	lib, _ := testSymbolLib(t)
+	sym := lib.Get("semiconductors/bjt/npn")
 	got := FitSymbol(sym, pinsNamed("base", "emitter", "collector"))
 	if got == nil {
 		t.Fatal("no fit")
@@ -136,11 +156,12 @@ func TestFitSymbolPrefersExactNames(t *testing.T) {
 
 func TestFitSymbolsUsesTheFinalIcon(t *testing.T) {
 	sh := &Sheet{Blocks: []Block{
-		{ID: "q1", Icon: "npn", Pins: pinsNamed("base", "collector", "emitter")},
+		{ID: "q1", Icon: "semiconductors/bjt/npn", Pins: pinsNamed("base", "collector", "emitter")},
 		{ID: "x1", Icon: "structural", Pins: pinsNamed("a", "b")},
 		{ID: "x2", Icon: "no-such-symbol", Pins: pinsNamed("a", "b")},
 	}}
-	FitSymbols(sh, BuiltinSymbols())
+	lib, _ := testSymbolLib(t)
+	FitSymbols(sh, lib)
 	if sh.Blocks[0].SymPins == nil {
 		t.Error("q1 should fit npn")
 	}
@@ -230,5 +251,44 @@ func TestParseSymbolRejects(t *testing.T) {
 
 	if _, err := ParseSymbol("../etc", []byte(symHead+`<path d="M0 0"/></svg>`)); err == nil {
 		t.Error("a symbol id with a path in it was accepted")
+	}
+}
+
+func TestParseSymbolLogicPorts(t *testing.T) {
+	src := symHead + `
+	  <path d="M0 -32 V0"/>
+	  <path d="M0 16 H8" data-if-pin="speed a"/>
+	  <circle data-pin="a" data-dir="up" cx="0" cy="-32" r="2"/>
+	  <circle data-logic="speed" data-alias="omega" data-flow="out" data-dir="right" cx="8" cy="16" r="2"/>
+	  <circle data-logic="" data-flow="in" data-dir="left" cx="-16" cy="0" r="2"/>
+	</svg>`
+	sym, err := ParseSymbol("t", []byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sym.Logic) != 2 || sym.Logic[0].Name != "speed" || sym.Logic[0].Flow != "out" || sym.Logic[1].Name != "" {
+		t.Errorf("logic = %+v", sym.Logic)
+	}
+	if sym.Parts[1].IfPin != "speed a" {
+		t.Errorf("if-pin list = %q", sym.Parts[1].IfPin)
+	}
+}
+
+func TestParseSymbolRejectsBadLogicPorts(t *testing.T) {
+	pin := `<path d="M0 -32 V0"/><circle data-pin="a" data-dir="up" cx="0" cy="-32" r="2"/>`
+	cases := map[string]string{
+		"no flow":     `<circle data-logic="x" data-dir="left" cx="-16" cy="0" r="2"/>`,
+		"bad flow":    `<circle data-logic="x" data-flow="both" data-dir="left" cx="-16" cy="0" r="2"/>`,
+		"off grid":    `<circle data-logic="x" data-flow="in" data-dir="left" cx="-13" cy="0" r="2"/>`,
+		"outside":     `<circle data-logic="x" data-flow="in" data-dir="left" cx="-64" cy="0" r="2"/>`,
+		"on a path":   `<path data-logic="x" data-flow="in" d="M0 0"/>`,
+		"twice":       `<circle data-logic="x" data-flow="in" data-dir="left" cx="-16" cy="0" r="2"/><circle data-logic="X" data-flow="out" data-dir="right" cx="16" cy="0" r="2"/>`,
+		"pin's name":  `<circle data-logic="a" data-flow="in" data-dir="left" cx="-16" cy="0" r="2"/>`,
+		"if-pin list": `<path d="M0 0" data-if-pin="a nothing"/>`,
+	}
+	for name, body := range cases {
+		if _, err := ParseSymbol("t", []byte(symHead+pin+body+`</svg>`)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
 	}
 }

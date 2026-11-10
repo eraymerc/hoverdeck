@@ -603,6 +603,28 @@ export namespace hvr {
 	
 	
 	
+	export class SymbolLogic {
+	    name: string;
+	    aliases: string[];
+	    flow: string;
+	    x: number;
+	    y: number;
+	    dir: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SymbolLogic(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.aliases = source["aliases"];
+	        this.flow = source["flow"];
+	        this.x = source["x"];
+	        this.y = source["y"];
+	        this.dir = source["dir"];
+	    }
+	}
 	export class SymbolPin {
 	    name: string;
 	    aliases: string[];
@@ -645,6 +667,7 @@ export namespace hvr {
 	    viewBox: number[];
 	    parts: SymbolPart[];
 	    pins: SymbolPin[];
+	    logic: SymbolLogic[];
 	
 	    static createFrom(source: any = {}) {
 	        return new Symbol(source);
@@ -657,6 +680,7 @@ export namespace hvr {
 	        this.viewBox = source["viewBox"];
 	        this.parts = this.convertValues(source["parts"], SymbolPart);
 	        this.pins = this.convertValues(source["pins"], SymbolPin);
+	        this.logic = this.convertValues(source["logic"], SymbolLogic);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -677,6 +701,7 @@ export namespace hvr {
 		    return a;
 		}
 	}
+	
 	
 
 }

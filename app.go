@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
@@ -31,9 +32,24 @@ type App struct {
 	// hover.lock — see hvr.ResolvePackages.
 	packages *hvr.Packages
 
+	// symbols is the schematic symbol set for the current packages and
+	// project: the built-ins plus what the libraries ship (hvr.NewSymbolLib).
+	// Rebuilt when either changes — see symbolLib.
+	symbols    *hvr.SymbolLib
+	symbolsFor struct {
+		pkgs *hvr.Packages
+		root string
+	}
+
 	workspace   string
 	project     *hvr.Project
 	layout      *hvr.Layout
+	// layoutMu serialises everything that reads or writes the layout. The
+	// frontend fires saves without waiting for each other — dropping a block
+	// saves its position and the wires it stretched at once — and Wails runs
+	// each call on its own goroutine, so without this two saves could write
+	// the same maps concurrently, or interleave on the sidecar file.
+	layoutMu    sync.Mutex
 	settings    *Settings
 	dataset     *plot.Dataset
 	detectedBin string
@@ -147,7 +163,9 @@ func (a *App) OpenProject(path string) (*ProjectInfo, error) {
 	a.entry = abs
 	a.packages = pkgs
 	a.project = p
+	a.layoutMu.Lock()
 	a.layout = hvr.LoadLayout(abs)
+	a.layoutMu.Unlock()
 
 	if a.settings.LastFile != abs {
 		a.settings.LastFile = abs
@@ -245,6 +263,24 @@ func (a *App) PickProject() (*ProjectInfo, error) {
 	return a.OpenProject(path)
 }
 
+// symbolLib returns the symbol set for the open packages and project, built
+// once per combination: the built-in symbols plus every library's symbols/
+// folders (hvr.NewSymbolLib). The project's own folders load on demand.
+func (a *App) symbolLib() *hvr.SymbolLib {
+	root := ""
+	if a.project != nil {
+		root = a.project.Root
+	}
+	if a.symbols == nil || a.symbolsFor.pkgs != a.packages || a.symbolsFor.root != root {
+		a.symbols = hvr.NewSymbolLib(a.packages, root)
+		a.symbolsFor.pkgs, a.symbolsFor.root = a.packages, root
+	}
+	if a.project != nil {
+		a.project.Symbols = a.symbols
+	}
+	return a.symbols
+}
+
 // ── Sheets ───────────────────────────────────────────────────────────────────
 
 // GetSheet builds the diagram for one module, with saved layout applied.
@@ -252,50 +288,52 @@ func (a *App) GetSheet(qualified string) (*hvr.Sheet, error) {
 	if a.project == nil {
 		return nil, fmt.Errorf("no project open")
 	}
+	a.symbolLib() // hands the project its symbol set, which BuildSheet reads
 	sh, err := a.project.BuildSheet(qualified)
 	if err != nil {
 		return nil, err
 	}
+	a.layoutMu.Lock()
 	a.layout.Apply(sh)
+	a.layoutMu.Unlock()
 	// After Apply: the sidecar may override a block's icon, and the symbol
 	// that has to fit is the one that will actually be drawn.
-	hvr.FitSymbols(sh, hvr.BuiltinSymbols())
+	hvr.FitSymbols(sh, a.symbolLib())
 	return sh, nil
 }
 
 // SetBlockPosition saves a block's position after a drag.
 func (a *App) SetBlockPosition(module, blockID string, x, y float64) error {
-	if a.layout == nil {
-		return fmt.Errorf("no project open")
-	}
-	a.layout.SetBlockPos(module, blockID, x, y)
-	return a.layout.Save(a.entry)
+	return a.editLayout(func(l *hvr.Layout) error { l.SetBlockPos(module, blockID, x, y); return nil })
 }
 
 // SetSignalPosition saves a signal / state-variable chip's position.
 func (a *App) SetSignalPosition(module, name string, x, y float64) error {
-	if a.layout == nil {
-		return fmt.Errorf("no project open")
-	}
-	a.layout.SetChipPos(module, name, x, y)
-	return a.layout.Save(a.entry)
+	return a.editLayout(func(l *hvr.Layout) error { l.SetChipPos(module, name, x, y); return nil })
 }
 
 // SetBlockIcon overrides the symbol drawn for a block.
 func (a *App) SetBlockIcon(module, blockID, icon string) error {
-	if a.layout == nil {
-		return fmt.Errorf("no project open")
-	}
-	a.layout.SetBlockIcon(module, blockID, icon)
-	return a.layout.Save(a.entry)
+	return a.editLayout(func(l *hvr.Layout) error { l.SetBlockIcon(module, blockID, icon); return nil })
 }
 
 // SetNetColor assigns a highlight colour to a net.
 func (a *App) SetNetColor(module, net, color string) error {
+	return a.editLayout(func(l *hvr.Layout) error { l.SetNetColor(module, net, color); return nil })
+}
+
+// editLayout applies one change to the open project's layout and saves it,
+// one change at a time (see layoutMu). A change that returns an error is not
+// saved.
+func (a *App) editLayout(change func(l *hvr.Layout) error) error {
+	a.layoutMu.Lock()
+	defer a.layoutMu.Unlock()
 	if a.layout == nil {
 		return fmt.Errorf("no project open")
 	}
-	a.layout.SetNetColor(module, net, color)
+	if err := change(a.layout); err != nil {
+		return err
+	}
 	return a.layout.Save(a.entry)
 }
 
@@ -366,8 +404,9 @@ type Catalog struct {
 // GetCatalog returns the built-in primitives, every installed package, and the
 // modules declared in the open project itself.
 func (a *App) GetCatalog() *Catalog {
-	c := &Catalog{Primitives: hvr.Primitives(), Symbols: hvr.BuiltinSymbols().All()}
-	c.Stdlib = hvr.ScanPackages(a.packages)
+	lib := a.symbolLib()
+	c := &Catalog{Primitives: hvr.Primitives()}
+	c.Stdlib = hvr.ScanPackages(a.packages, lib)
 
 	if a.project != nil {
 		for _, d := range a.project.Modules() {
@@ -386,7 +425,7 @@ func (a *App) GetCatalog() *Catalog {
 			c.Local = append(c.Local, hvr.CatalogEntry{
 				Kind:         "module",
 				Name:         d.Name,
-				Icon:         hvr.IconFor(d.Name, d.Domain, d.File),
+				Icon:         lib.For(d.Name, d.Domain, d.File),
 				Domain:       d.Domain,
 				Desc:         d.Doc,
 				Group:        filepath.Base(d.File),
@@ -398,6 +437,7 @@ func (a *App) GetCatalog() *Catalog {
 			})
 		}
 	}
+	c.Symbols = lib.All() // after the scans: they load the symbols they find
 	return c
 }
 
@@ -565,23 +605,13 @@ func (a *App) IsRunning() bool { return a.runner.Running() }
 // and stores them in the sidecar. Presentation only — the netlist is the
 // source's, and is unchanged.
 func (a *App) SetNetWires(module, net string, wires []hvr.WireSeg) error {
-	if a.layout == nil {
-		return fmt.Errorf("no project open")
-	}
-	if err := a.layout.SetNetWires(module, net, wires); err != nil {
-		return err
-	}
-	return a.layout.Save(a.entry)
+	return a.editLayout(func(l *hvr.Layout) error { return l.SetNetWires(module, net, wires) })
 }
 
 // SetBlockTransform rotates and/or mirrors a block on the canvas. This is
 // presentation only — the netlist is unchanged.
 func (a *App) SetBlockTransform(module, blockID string, rot int, flipX, flipY bool) error {
-	if a.layout == nil {
-		return fmt.Errorf("no project open")
-	}
-	a.layout.SetBlockTransform(module, blockID, rot, flipX, flipY)
-	return a.layout.Save(a.entry)
+	return a.editLayout(func(l *hvr.Layout) error { l.SetBlockTransform(module, blockID, rot, flipX, flipY); return nil })
 }
 
 // ClearNetWires forgets a net's hand-edited drawing, returning it to
@@ -593,13 +623,7 @@ func (a *App) ClearNetWires(module, net string) error {
 // SetSignalWires saves the hand-edited drawing of a logic signal's links —
 // the dashed wires from its chip to the blocks that use it.
 func (a *App) SetSignalWires(module, signal string, wires []hvr.WireSeg) error {
-	if a.layout == nil {
-		return fmt.Errorf("no project open")
-	}
-	if err := a.layout.SetSignalWires(module, signal, wires); err != nil {
-		return err
-	}
-	return a.layout.Save(a.entry)
+	return a.editLayout(func(l *hvr.Layout) error { return l.SetSignalWires(module, signal, wires) })
 }
 
 // ClearSignalWires returns a signal's links to automatic routing.

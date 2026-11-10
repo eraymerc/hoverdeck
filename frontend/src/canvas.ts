@@ -19,9 +19,10 @@
  */
 
 import { iconSvg, groundSymbol, symbolOf, symbolBody } from './icons';
+import { placeOnSymbol, PORT_PITCH, type LogicArg } from './ports';
 import {
   autoRoute, reconcile, junctions, bends, labelAnchor, sameDrawing, snap, stubVec,
-  moveSegment, moveCorner, splitAt, removePoint, dragEnd,
+  moveSegment, moveCorner, separateAt, removePoint, dragEnd, rewirePin,
   type Seg, type Pt, type Terminal,
 } from './wires';
 import type { SafeSheet as Sheet, SafeBlock as Block, SafeNet as Net, Signal, SymbolDef } from './types';
@@ -62,6 +63,26 @@ interface Geom {
   pins: PinGeom[];
   /** The symbol this block is drawn as, or null for a box. */
   sym: SymbolDef | null;
+  /** Where each logic argument that carries a signal attaches. */
+  logic: LogicGeom[];
+  /** Port rails to draw, world coordinates. */
+  rails: Seg[];
+  /** The symbol's own logic places in use — for its data-if-pin parts. */
+  slots: string[];
+}
+
+/** One logic port's attachment point. */
+interface LogicGeom {
+  /** Index among the block's logic arguments. */
+  arg: number;
+  signal: string;
+  /** The declared port name, '' where there is none. */
+  name: string;
+  flow: 'in' | 'out';
+  x: number;
+  y: number;
+  /** The way the link leaves the port. */
+  dir: Dir;
 }
 
 type Dir = PinGeom['dir'];
@@ -69,11 +90,6 @@ type Dir = PinGeom['dir'];
 /** Where a signal's links leave its chip: the middle of its bottom edge. */
 function chipAnchor(c: { x: number; y: number; w: number; h: number }): Pt {
   return [Math.round(c.x + c.w / 2), c.y + c.h];
-}
-
-/** Where a signal's link meets a block: the middle of its top edge. */
-function linkAnchor(g: { x: number; y: number; w: number }): Pt {
-  return [Math.round(g.x + g.w / 2), g.y];
 }
 
 /** What a wire belongs to: an electrical net, or a logic signal's links. */
@@ -395,7 +411,7 @@ export class Canvas {
     const minX = Math.min(...xs), minY = Math.min(...ys);
 
     const g: Geom = {
-      block: b, sym, pins: [],
+      block: b, sym, pins: [], logic: [], rails: [], slots: [],
       x: b.x + minX, y: b.y + minY,
       w: Math.max(...xs) - minX, h: Math.max(...ys) - minY,
     };
@@ -408,7 +424,38 @@ export class Canvas {
         blockId: b.id, ref: p.ref,
       });
     });
+
+    // Logic ports: placed in the symbol's own coordinates (the symbol's
+    // places, then free sides, then a rail — see ports.ts) and turned with
+    // it, like the pins.
+    const args = this.logicArgs(b);
+    if (args.length) {
+      const pinDirs = b.symPins.map((j) => spins[j].dir);
+      const place = placeOnSymbol(sym.viewBox, pinDirs, sym.logic ?? [], args);
+      for (const pp of place.ports) {
+        const a = args.find((x) => x.arg === pp.arg)!;
+        const [dx, dy] = o.apply(pp.x, pp.y);
+        g.logic.push({ arg: a.arg, signal: a.signal, name: a.name, flow: a.flow, x: b.x + dx, y: b.y + dy, dir: o.dir(pp.dir) });
+      }
+      for (const [x1, y1, x2, y2] of place.rails) {
+        const [ax, ay] = o.apply(x1, y1), [bx, by] = o.apply(x2, y2);
+        g.rails.push([b.x + ax, b.y + ay, b.x + bx, b.y + by]);
+      }
+      g.slots = place.slots;
+    }
     return g;
+  }
+
+  /** The block's logic arguments that carry a signal, and so need a port. */
+  private logicArgs(b: Block): (LogicArg & { signal: string })[] {
+    const signals = new Set((this.sheet?.signals ?? []).map((s) => s.name));
+    const out: (LogicArg & { signal: string })[] = [];
+    b.logic.forEach((a, i) => {
+      const signal = a.text.trim();
+      if (!signals.has(signal)) return;
+      out.push({ arg: i, signal, name: b.logicPorts[i]?.name ?? '', flow: isOutput(b, i) ? 'out' : 'in' });
+    });
+    return out;
   }
 
   /** Geometry for a block drawn as a box: pins split across two edges. */
@@ -428,10 +475,33 @@ export class Canvas {
     const rot = ((b.rot % 360) + 360) % 360;
     const vertical = rot === 90 || rot === 270;
 
-    const w = vertical ? Math.max(BLOCK_W, rows * PIN_SPACING + 60) : BLOCK_W;
-    const h = vertical ? BLOCK_MIN_H : Math.max(BLOCK_MIN_H, HEADER_H + rows * PIN_SPACING + 12);
+    let w = vertical ? Math.max(BLOCK_W, rows * PIN_SPACING + 60) : BLOCK_W;
+    let h = vertical ? BLOCK_MIN_H : Math.max(BLOCK_MIN_H, HEADER_H + rows * PIN_SPACING + 12);
 
-    const g: Geom = { block: b, x: b.x, y: b.y, w, h, pins: [], sym: null };
+    // Logic ports: inputs on the top edge and outputs on the bottom, each a
+    // pitch apart — turned with the block like everything else. The box grows
+    // to hold the longer row.
+    const args = this.logicArgs(b);
+    const o = orientation(b);
+    const inSide = o.dir('up'), outSide = o.dir('down');
+    const nIn = args.filter((a) => a.flow === 'in').length;
+    const nOut = args.length - nIn;
+    const need = Math.max(nIn, nOut) * PORT_PITCH + 32;
+    if (inSide === 'up' || inSide === 'down') w = Math.max(w, need);
+    else h = Math.max(h, need);
+
+    const g: Geom = { block: b, x: b.x, y: b.y, w, h, pins: [], sym: null, logic: [], rails: [], slots: [] };
+    for (const flow of ['in', 'out'] as const) {
+      const list = args.filter((a) => a.flow === flow);
+      const d = flow === 'in' ? inSide : outSide;
+      list.forEach((a, i) => {
+        const off = Math.round((i - (list.length - 1) / 2) * PORT_PITCH);
+        const [x, y] = d === 'up' || d === 'down'
+          ? [Math.round(g.x + w / 2) + off, d === 'up' ? g.y : g.y + h]
+          : [d === 'left' ? g.x : g.x + w, Math.round(g.y + h / 2) + off];
+        g.logic.push({ arg: a.arg, signal: a.signal, name: a.name, flow, x, y, dir: d });
+      });
+    }
 
     // Which physical edge each group lands on, before mirroring.
     let sideA: PinGeom['dir'], sideB: PinGeom['dir'];
@@ -573,14 +643,14 @@ export class Canvas {
       out.push(
         `<path class="seg-grip ${s[1] === s[3] ? 'h' : 'v'} ${kind}" ${own} data-wk="${kind}" data-wn="${n}" ` +
         `data-seg="${i}" d="M${s[0]} ${s[1]} L${s[2]} ${s[3]}"><title>${what}: drag to move this segment ` +
-        `· double-click to add a bend · right-click for more</title></path>`,
+        `· double-click to separate it here · right-click for more</title></path>`,
       );
     });
     for (const [x, y] of bends(segs, pins)) {
       out.push(
         `<rect class="bend-grip ${kind}" ${own} data-wk="${kind}" data-wn="${n}" data-pt="${x},${y}" ` +
         `x="${x - 5}" y="${y - 5}" width="10" height="10"><title>${what}: drag to move this bend ` +
-        `· double-click to remove it</title></rect>`,
+        `· double-click to take it out</title></rect>`,
       );
     }
     for (const [x, y] of junctions(segs, pins)) {
@@ -678,11 +748,14 @@ export class Canvas {
         };
       }));
     }
-    for (const sig of new Set(this.signalsOf(b))) {
-      this.grab('sig', sig, [{
-        from: linkAnchor(g),
-        now: () => { const ng = this.geoms.get(b.id); return ng ? linkAnchor(ng) : null; },
-      }]);
+    for (const sig of new Set(g.logic.map((l) => l.signal))) {
+      this.grab('sig', sig, g.logic.filter((l) => l.signal === sig).map((l) => ({
+        from: [l.x, l.y] as Pt,
+        now: () => {
+          const nl = this.geoms.get(b.id)?.logic.find((q) => q.arg === l.arg);
+          return nl ? [nl.x, nl.y] : null;
+        },
+      })));
     }
   }
 
@@ -716,6 +789,59 @@ export class Canvas {
       const o = this.owner(r.kind, r.name);
       if (o) o.wires = segs ?? r.base;
     }
+  }
+
+  /**
+   * Rotates or mirrors a block. Its edited wires are not re-routed: each one
+   * keeps its drawing and gets new bends out to the port where it now is,
+   * leaving it the way the turned symbol does (see rewirePin). Saves those
+   * wires; the caller saves the transform itself.
+   */
+  transformBlock(id: string, rot: number, flipX: boolean, flipY: boolean) {
+    const b = this.sheet?.blocks.find((x) => x.id === id);
+    const before = this.geoms.get(id);
+    if (!b || !before) return;
+    const oldPins = before.pins.map((p) => ({ ...p }));
+    const oldLogic = before.logic.map((l) => ({ ...l }));
+
+    b.rot = rot;
+    b.flipX = flipX;
+    b.flipY = flipY;
+    const g = this.symbolGeom(b) ?? this.boxGeom(b);
+    this.geoms.set(id, g);
+    const box = { x: g.x, y: g.y, w: g.w, h: g.h };
+
+    const changed: [WireKind, string][] = [];
+    const nets = new Set(oldPins.filter((p) => !p.ref).map((p) => p.net));
+    for (const net of nets) {
+      const o = this.owner('net', net);
+      let segs = this.drawn.get(wireKey('net', net));
+      if (!o?.wires || !segs) continue;
+      const fixed = this.fixedPoints('net', net);
+      for (const p of oldPins.filter((q) => q.net === net && !q.ref)) {
+        const np = g.pins.find((q) => q.index === p.index);
+        if (!np) continue;
+        segs = rewirePin(segs, [p.x, p.y], p.dir, [np.x, np.y], np.dir, fixed, box) ?? segs;
+      }
+      o.wires = segs;
+      changed.push(['net', net]);
+    }
+    for (const sig of new Set(oldLogic.map((l) => l.signal))) {
+      const o = this.owner('sig', sig);
+      let segs = this.drawn.get(wireKey('sig', sig));
+      if (!o?.wires || !segs) continue;
+      const fixed = this.fixedPoints('sig', sig);
+      for (const l of oldLogic.filter((q) => q.signal === sig)) {
+        const nl = g.logic.find((q) => q.arg === l.arg);
+        if (!nl) continue;
+        segs = rewirePin(segs, [l.x, l.y], l.dir, [nl.x, nl.y], nl.dir, fixed, box) ?? segs;
+      }
+      o.wires = segs;
+      changed.push(['sig', sig]);
+    }
+
+    this.render(this.sheet);
+    for (const [kind, name] of changed) this.saveWires(kind, name);
   }
 
   /** After a drop: saves the wires that were stretched, and lets go of them. */
@@ -773,26 +899,18 @@ export class Canvas {
    * shows which way the value flows (direction comes from the module's
    * declared input/output).
    */
-  private signalTerminals(name: string): { terms: Terminal[]; reads: Pt[] } {
+  private signalTerminals(name: string): { terms: Terminal[]; reads: { x: number; y: number; dir: Dir }[] } {
     const c = this.chipGeoms.get(name);
     if (!c || !this.sheet) return { terms: [], reads: [] };
     const [chx, chy] = chipAnchor(c);
     const terms: Terminal[] = [{ x: chx, y: chy, dir: 'down', blockId: '', box: null }];
-    const reads: Pt[] = [];
-    const seen = new Set<string>();
-    for (const b of this.sheet.blocks) {
-      const g = this.geoms.get(b.id);
-      if (!g) continue;
-      b.logic.forEach((arg, i) => {
-        if (arg.text.trim() !== name) return;
-        const pt = linkAnchor(g);
-        const k = pt.join();
-        if (!seen.has(k)) {
-          seen.add(k);
-          terms.push({ x: pt[0], y: pt[1], dir: 'up', blockId: b.id, box: { x: g.x, y: g.y, w: g.w, h: g.h } });
-        }
-        if (!isOutput(b, i) && !reads.some((r) => r.join() === k)) reads.push(pt);
-      });
+    const reads: { x: number; y: number; dir: Dir }[] = [];
+    for (const g of this.geoms.values()) {
+      for (const l of g.logic) {
+        if (l.signal !== name) continue;
+        terms.push({ x: l.x, y: l.y, dir: l.dir, blockId: g.block.id, box: { x: g.x, y: g.y, w: g.w, h: g.h } });
+        if (l.flow === 'in') reads.push({ x: l.x, y: l.y, dir: l.dir });
+      }
     }
     return { terms, reads };
   }
@@ -813,8 +931,13 @@ export class Canvas {
     const segs = sig.wires ? reconcile(sig.wires, terms, clear) : autoRoute(terms, clear);
     this.drawn.set(key, segs);
     const n = esc(sig.name);
-    const arrows = reads.map(([x, y]) =>
-      `<polygon class="slink-arrow" data-sig="${n}" points="${x - 4},${y - 7} ${x + 4},${y - 7} ${x},${y}"/>`);
+    const arrows = reads.map(({ x, y, dir }) => {
+      // Tip on the port, base a little out along the way the link leaves.
+      const [ux, uy] = stubVec(dir);
+      const bx = x + ux * 7, by = y + uy * 7;
+      return `<polygon class="slink-arrow" data-sig="${n}" ` +
+        `points="${bx - uy * 4},${by + ux * 4} ${bx + uy * 4},${by - ux * 4} ${x},${y}"/>`;
+    });
     return this.wireMarkup('sig', sig.name, segs, terms.map((t) => [t.x, t.y] as Pt)) + arrows.join('');
   }
 
@@ -902,6 +1025,7 @@ export class Canvas {
             `<text class="state-badge-text" x="${g.x + g.w - 11}" y="${g.y + 14}" text-anchor="middle">↧</text>`
           : '') +
         pinMarkup +
+        this.logicMarkup(g) +
         `</g>`,
       );
     }
@@ -915,7 +1039,7 @@ export class Canvas {
    */
   private renderSymbolBlock(b: Block, g: Geom, sym: SymbolDef): string {
     const o = orientation(b);
-    const connected = new Set((b.symPins ?? []).map((j) => sym.pins![j].name));
+    const connected = new Set([...(b.symPins ?? []).map((j) => sym.pins![j].name), ...g.slots]);
     const pad = 4;
 
     const pinMarkup = g.pins.map((p) => {
@@ -942,8 +1066,30 @@ export class Canvas {
           `<text class="state-badge-text" x="${g.x + g.w}" y="${g.y + 3}" text-anchor="middle">↧</text>`
         : '') +
       pinMarkup +
+      this.logicMarkup(g) +
       `</g>`
     );
+  }
+
+  /**
+   * A block's logic ports: any rail they sit on, and an invisible target on
+   * each that names the port and its signal on hover. The link itself shows
+   * where the port is; names stay off the drawing, where at a 16px pitch
+   * they would only collide.
+   */
+  private logicMarkup(g: Geom): string {
+    const out: string[] = [];
+    for (const r of g.rails) {
+      out.push(`<path class="logic-rail" d="M${r[0]} ${r[1]} L${r[2]} ${r[3]}"/>`);
+    }
+    for (const l of g.logic) {
+      const port = l.name || (l.flow === 'in' ? 'input' : 'output');
+      out.push(
+        `<circle class="logic-hit" data-sig="${esc(l.signal)}" cx="${l.x}" cy="${l.y}" r="6">` +
+        `<title>${esc(port)} ${l.flow === 'in' ? '←' : '→'} ${esc(l.signal)}</title></circle>`,
+      );
+    }
+    return out.join('');
   }
 
   /** Reference, type and value beside a symbol, like a schematic's fields. */
@@ -953,7 +1099,7 @@ export class Canvas {
     if (b.kind === 'instance') lines.push({ text: trunc(b.typeName, 16), cls: 'block-type' });
     if (params) lines.push({ text: trunc(params, 22), cls: 'block-param' });
 
-    const used = new Set(g.pins.map((p) => p.dir));
+    const used = new Set([...g.pins.map((p) => p.dir), ...g.logic.map((l) => l.dir)]);
     const side = (['right', 'left', 'down', 'up'] as Dir[]).find((d) => !used.has(d)) ?? 'down';
     const LINE = 12;
     const cx = g.x + g.w / 2, cy = g.y + g.h / 2;
@@ -1085,8 +1231,10 @@ export class Canvas {
   private wireNetEvents(scope: Element) {
     // Segments: drag to move one perpendicular to itself — a horizontal one
     // up or down, a vertical one sideways — with the wires around it
-    // stretching to follow. Double-click to split it there, leaving a point
-    // either half can be bent at. Every edit starts from exactly what is on
+    // stretching to follow, and anything brought into line merging with it.
+    // Double-click to separate it there into a step: the part to the left
+    // (or above) is pushed aside, ready to be dragged into shape — or back
+    // into line, where it merges again. Every edit starts from exactly what is on
     // screen and freezes the whole wire: from then on its drawing is saved,
     // and only a moved block's own branch is ever re-routed. Nets and
     // signal links work the same way.
@@ -1135,7 +1283,7 @@ export class Canvas {
             this.saveWires(kind, name);
           } else if (this.isDoubleTap(`seg:${kind}:${name}:${idx}`)) {
             const p = this.toWorld(ue.clientX, ue.clientY);
-            o.wires = splitAt(base, idx, p.x, p.y, fixed);
+            o.wires = separateAt(base, idx, p.x, p.y, fixed);
             this.redrawWires(kind, [name]);
             this.saveWires(kind, name);
           } else {

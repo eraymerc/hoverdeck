@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   autoRoute, reconcile, normalize, junctions, bends, connected, sameDrawing, labelAnchor,
-  moveSegment, moveCorner, splitAt, removePoint, dragEnd,
+  moveSegment, moveCorner, splitAt, removePoint, dragEnd, rewirePin, separateAt,
   type Seg, type Terminal, type Pt,
 } from './wires.ts';
 
@@ -236,4 +236,99 @@ test('when the far end is another pin, a connector keeps it in place', () => {
 
 test('dragEnd declines a pin the wire is not attached to', () => {
   assert.equal(dragEnd(twoPin, [999, 999], [1000, 1000], twoPins), null);
+});
+
+// ── Turning a block: new bends to the ports where they now are ──
+
+// A vertical resistor centred on the origin, pins at (0, ±32). Its top pin's
+// wire goes up to y = -64 and off to the right, to a pin at (96, -64).
+const resistorBox = { x: -16, y: -32, w: 32, h: 64 };
+const topWire: Seg[] = [[0, -32, 0, -64], [0, -64, 96, -64]];
+
+test('turning a block keeps the wire and bends round to the new port', () => {
+  // Rotated a quarter turn: the top pin is now at (32, 0), facing right.
+  const turnedBox = { x: -32, y: -16, w: 64, h: 32 };
+  const next = rewirePin(topWire, [0, -32], 'up', [32, 0], 'right', [[96, -64]], turnedBox)!;
+  assert.ok(connected(next, [[32, 0], [96, -64]]));
+  // The far part of the wire is untouched.
+  assert.ok(has(next, [0, -64, 96, -64]) || next.some((s) => s[1] === -64 && s[3] === -64 && Math.max(s[0], s[2]) === 96));
+  // The new port is left along its new direction.
+  assert.ok(next.some((s) => (s[0] === 32 && s[1] === 0 && s[3] === 0 && s[2] > 32) || (s[2] === 32 && s[3] === 0 && s[1] === 0 && s[0] > 32)));
+  // And no new segment cuts through the turned block.
+  const inside = (s: Seg) => Math.max(s[0], s[2]) > turnedBox.x && Math.min(s[0], s[2]) < turnedBox.x + turnedBox.w &&
+    Math.max(s[1], s[3]) > turnedBox.y && Math.min(s[1], s[3]) < turnedBox.y + turnedBox.h;
+  assert.deepEqual(next.filter(inside), [], 'nothing through the block');
+});
+
+test('mirroring a block re-attaches to the mirrored port', () => {
+  // Mirrored left-right, a pin on the right edge facing right moves to the left facing left.
+  const wire: Seg[] = [[32, 0, 96, 0]];
+  const next = rewirePin(wire, [32, 0], 'right', [-32, 0], 'left', [[96, 0]], { x: -32, y: -16, w: 64, h: 32 })!;
+  assert.ok(connected(next, [[-32, 0], [96, 0]]));
+});
+
+test('rewirePin declines a pin the wire is not attached to', () => {
+  assert.equal(rewirePin(topWire, [9, 9], 'up', [10, 10], 'left', [], resistorBox), null);
+});
+
+// ── Separating and merging ──
+
+test('double-click on a horizontal run pushes its left part down into a step', () => {
+  const pins: Pt[] = [[0, 0], [96, 0]];
+  const next = separateAt([[0, 0, 96, 0]], 0, 50, 0, pins);
+  assert.ok(connected(next, pins));
+  // The pin keeps its lead-out; the left part runs 16 lower; a jog at x = 48.
+  assert.ok(sameDrawing(next, [[0, 0, 16, 0], [16, 0, 16, 16], [16, 16, 48, 16], [48, 0, 48, 16], [48, 0, 96, 0]]));
+});
+
+test('double-click on a vertical run pushes its upper part to the left', () => {
+  const pins: Pt[] = [[0, 0], [0, 96]];
+  const next = separateAt([[0, 0, 0, 96]], 0, 0, 48, pins);
+  assert.ok(connected(next, pins));
+  assert.ok(has(next, [-16, 16, -16, 48]), 'the upper part runs 16 to the left');
+});
+
+test('dragging a separated part back into line merges it into one run', () => {
+  const pins: Pt[] = [[0, 0], [96, 0]];
+  const step = separateAt([[0, 0, 96, 0]], 0, 48, 0, pins);
+  const low = step.findIndex((s) => s[1] === 16 && s[3] === 16);
+  const back = moveSegment(step, low, -16, pins);
+  assert.deepEqual(back, [[0, 0, 96, 0]]);
+});
+
+test('a run dragged on top of another merges with it', () => {
+  // A U under two pins; lifting its bottom up onto the pins' line leaves one run.
+  const pins: Pt[] = [[0, 0], [64, 0]];
+  const u: Seg[] = [[0, 0, 0, 32], [0, 32, 64, 32], [64, 32, 64, 0]];
+  const flat = moveSegment(u, 1, -32, pins);
+  assert.deepEqual(flat, [[0, 0, 64, 0]]);
+});
+
+test('merging never swallows a junction', () => {
+  // A T whose stem is dragged sideways: the junction slides along with it,
+  // and the run it sits on stays split there — merged straight through, the
+  // junction would lose its dot.
+  const pins: Pt[] = [[0, 0], [64, 0], [32, 32]];
+  const t: Seg[] = [[0, 0, 32, 0], [32, 0, 64, 0], [32, 0, 32, 32]];
+  const next = moveSegment(t, 2, 16, pins);
+  assert.ok(connected(next, pins));
+  assert.ok(!next.some((s) => s[1] === 0 && s[3] === 0 && Math.min(s[0], s[2]) === 0 && Math.max(s[0], s[2]) === 64),
+    'the run is not merged through the junction');
+  assert.deepEqual(junctions(next, pins), [[48, 0]]);
+});
+
+test('separating never folds away a pin lead: it pushes the other way instead', () => {
+  // The FOC case: a pin at (80, 48) facing up, a 16px lead to (80, 32), and
+  // the run going right. Pushing the left part down would land it on the pin.
+  const pins: Pt[] = [[80, 48], [288, 64]];
+  const wire: Seg[] = [[80, 32, 80, 48], [80, 32, 288, 32], [288, 32, 288, 64]];
+  const next = separateAt(wire, 1, 112, 32, pins);
+  assert.ok(connected(next, pins));
+  const lead = next.find((s) => (s[0] === 80 && s[1] === 48) || (s[2] === 80 && s[3] === 48))!;
+  assert.ok(lead[0] === lead[2] && Math.min(lead[1], lead[3]) < 48, 'the pin still leaves upwards');
+  assert.ok(next.some((s) => s[1] === 16 && s[3] === 16), 'the left part went up instead');
+  // And dragged back into line, it is one run again.
+  const up = next.findIndex((s) => s[1] === 16 && s[3] === 16);
+  const back = moveSegment(next, up, 16, pins);
+  assert.ok(sameDrawing(back, wire));
 });

@@ -300,6 +300,19 @@ export interface SymbolDef {
   parts: SymbolPart[] | null;
   /** Empty for a header glyph that only ever decorates a box. */
   pins: SymbolPin[] | null;
+  /** Places the symbol gives its logic ports, if any — see ports.ts. */
+  logic: SymbolLogic[] | null;
+}
+
+/** A place a symbol gives for a logic port's link. */
+export interface SymbolLogic {
+  /** Binds to a port by name; '' takes the next port of its flow. */
+  name: string;
+  aliases: string[] | null;
+  flow: 'in' | 'out';
+  x: number;
+  y: number;
+  dir: 'left' | 'right' | 'up' | 'down';
 }
 
 export interface InsertRequest {

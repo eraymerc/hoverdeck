@@ -126,6 +126,11 @@ type Project struct {
 	// Packages is the import table this project resolved against.
 	Packages *Packages
 
+	// Symbols is the schematic symbol set for this project: built-ins plus
+	// what its packages and its own folders ship (libsymbols.go). The app sets
+	// it; nil draws library modules with the generic shapes only.
+	Symbols *SymbolLib
+
 	Files map[string]*File
 	Order []string
 

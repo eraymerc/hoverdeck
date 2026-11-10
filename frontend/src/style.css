@@ -720,6 +720,10 @@ svg.canvas.panning { cursor: grabbing; }
 .sigg .bend-grip:hover { fill: var(--signal); }
 .sig-junction { fill: var(--signal); }
 .slink-arrow { fill: var(--signal); fill-opacity: .75; }
+/* Logic ports: a rail where a symbol had to carry its row past its own end,
+   and a hover target on each port. */
+.logic-rail { fill: none; stroke: var(--signal); stroke-width: 1.5; stroke-opacity: .75; }
+.logic-hit { fill: transparent; stroke: none; }
 .slink-arrow.hot { fill-opacity: 1; }
 
 /* Right-click menu on a wire. */
